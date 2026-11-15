@@ -9,13 +9,19 @@ local band, rshift = bit.band, bit.rshift
 
 -- ── Output path ───────────────────────────────────────────────────────────────
 
-local function mythos_base_dir()
+-- Home folder (KOReader home_dir setting, or a sane fallback). Shared by the
+-- exporter ("<home>/Inkstream") and by live reading ("<home>/<title>.epub").
+local function home_dir()
     local home = G_reader_settings and G_reader_settings:readSetting("home_dir")
     if not home or home == "" then
         local full = DataStorage:getFullDataDir() or DataStorage:getDataDir()
         home = full:match("^(.*)/%.adds/") or full:match("^(.*)/koreader$") or full
     end
-    return home .. "/Mythos"
+    return home
+end
+
+local function inkstream_base_dir()
+    return home_dir() .. "/Inkstream"
 end
 
 -- ── Cover image fetch ─────────────────────────────────────────────────────────
@@ -36,13 +42,13 @@ local function fetch_cover(url)
         timeout = 15,
     }
     if not ok or code ~= 200 then
-        logger.warn("Mythos/Epub: cover fetch failed url=", url, "code=", tostring(code))
+        logger.warn("Inkstream/Epub: cover fetch failed url=", url, "code=", tostring(code))
         return nil
     end
     local data = table.concat(sink)
     local ext  = (url:match("%.(%w+)%??[^%.]*$") or "jpg"):lower()
     if ext ~= "png" and ext ~= "webp" then ext = "jpg" end
-    logger.dbg("Mythos/Epub: cover fetched bytes=", #data, "ext=", ext)
+    logger.dbg("Inkstream/Epub: cover fetched bytes=", #data, "ext=", ext)
     return data, ext
 end
 
@@ -140,7 +146,9 @@ li a{text-decoration:none}
 .cover-wrap{text-align:center;margin:0;padding:0}
 .cover-wrap img{max-width:100%;display:block;margin:auto}]]
 
-local function make_opf(meta, chapters, cover_ext)
+-- live: spine = optional cover page, then chapters only (no synopsis page,
+-- no HTML ToC page).
+local function make_opf(meta, chapters, cover_ext, live)
     local man, spine = {}, {}
 
     if cover_ext then
@@ -150,12 +158,14 @@ local function make_opf(meta, chapters, cover_ext)
         table.insert(spine, '    <itemref idref="cover-page" linear="yes"/>')
     end
 
-    table.insert(man,   '    <item id="synopsis" href="Text/synopsis.xhtml" media-type="application/xhtml+xml"/>')
-    table.insert(spine, '    <itemref idref="synopsis"/>')
+    if not live then
+        table.insert(man,   '    <item id="synopsis" href="Text/synopsis.xhtml" media-type="application/xhtml+xml"/>')
+        table.insert(spine, '    <itemref idref="synopsis"/>')
 
-    if #chapters > 1 then
-        table.insert(man,   '    <item id="toc-page" href="Text/toc.xhtml" media-type="application/xhtml+xml"/>')
-        table.insert(spine, '    <itemref idref="toc-page"/>')
+        if #chapters > 1 then
+            table.insert(man,   '    <item id="toc-page" href="Text/toc.xhtml" media-type="application/xhtml+xml"/>')
+            table.insert(spine, '    <itemref idref="toc-page"/>')
+        end
     end
 
     for i = 1, #chapters do
@@ -177,7 +187,7 @@ local function make_opf(meta, chapters, cover_ext)
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <dc:title>%s</dc:title>
     <dc:creator opf:role="aut">%s</dc:creator>
-    <dc:identifier id="bid">mythos:%s</dc:identifier>
+    <dc:identifier id="bid">inkstream:%s</dc:identifier>
     <dc:language>%s</dc:language>
 %s%s
   </metadata>
@@ -197,18 +207,21 @@ local function make_opf(meta, chapters, cover_ext)
         table.concat(man, "\n"), table.concat(spine, "\n"))
 end
 
-local function make_ncx(meta, chapters, has_cover)
+-- live: ToC lists only what is in the file (optional cover + chapters).
+local function make_ncx(meta, chapters, has_cover, live)
     local nav  = {}
     local play = 1
     if has_cover then
         table.insert(nav, ('    <navPoint id="cover" playOrder="%d"><navLabel><text>Cover</text></navLabel><content src="Text/cover.xhtml"/></navPoint>'):format(play))
         play = play + 1
     end
-    table.insert(nav, ('    <navPoint id="synopsis" playOrder="%d"><navLabel><text>Synopsis</text></navLabel><content src="Text/synopsis.xhtml"/></navPoint>'):format(play))
-    play = play + 1
-    if #chapters > 1 then
-        table.insert(nav, ('    <navPoint id="toc-page" playOrder="%d"><navLabel><text>Table of Contents</text></navLabel><content src="Text/toc.xhtml"/></navPoint>'):format(play))
+    if not live then
+        table.insert(nav, ('    <navPoint id="synopsis" playOrder="%d"><navLabel><text>Synopsis</text></navLabel><content src="Text/synopsis.xhtml"/></navPoint>'):format(play))
         play = play + 1
+        if #chapters > 1 then
+            table.insert(nav, ('    <navPoint id="toc-page" playOrder="%d"><navLabel><text>Table of Contents</text></navLabel><content src="Text/toc.xhtml"/></navPoint>'):format(play))
+            play = play + 1
+        end
     end
     for i, ch in ipairs(chapters) do
         table.insert(nav, ('    <navPoint id="n%d" playOrder="%d"><navLabel><text>%s</text></navLabel><content src="Text/%s.xhtml"/></navPoint>'):format(
@@ -218,7 +231,7 @@ local function make_ncx(meta, chapters, has_cover)
     return ([[<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
-    <meta name="dtb:uid" content="mythos:%s"/>
+    <meta name="dtb:uid" content="inkstream:%s"/>
     <meta name="dtb:depth" content="1"/>
     <meta name="dtb:totalPageCount" content="0"/>
     <meta name="dtb:maxPageNumber" content="0"/>
@@ -319,7 +332,7 @@ local function make_chapter_xhtml(title, body)
 </html>]]):format(xml_esc(title), xml_esc(title), body)
 end
 
--- ── mkdir -p ──────────────────────────────────────────────────────────────────
+-- ── mkdir -p (lfs.mkdir is not recursive; use this for every directory) ──────────────────────────────────────────────────────────────────
 
 local function mkdirp(path)
     local cur = path:match("^/") and "/" or ""
@@ -330,15 +343,23 @@ local function mkdirp(path)
 end
 
 -- ── Public: build one EPUB ────────────────────────────────────────────────────
--- meta: {title, author, language, series, series_index, cover_url, summary}
+-- meta: {title, author, language, series, series_index, cover_url, summary,
+--        cover_data, cover_ext}   (cover_data/cover_ext: pre-fetched bytes,
+--        used instead of a new fetch when opts.live is set)
 -- chapters: [{title, content}]
+-- opts: { live = true } builds a live window: no synopsis page, no HTML ToC
+-- page, pre-fetched cover used as-is. In live mode a second return value is
+-- the number of front-matter spine items (1 with a cover page, else 0).
 
-local function build(meta, chapters, output_path)
+local function build(meta, chapters, output_path, opts)
+    local live = opts and opts.live
     mkdirp(output_path:match("^(.*)[/\\][^/\\]+$") or ".")
 
-    -- Fetch cover (optional)
+    -- Cover: pre-fetched bytes in live mode, otherwise fetch the URL.
     local cover_data, cover_ext
-    if meta.cover_url and meta.cover_url ~= "" then
+    if live and meta.cover_data and meta.cover_ext then
+        cover_data, cover_ext = meta.cover_data, meta.cover_ext
+    elseif meta.cover_url and meta.cover_url ~= "" then
         cover_data, cover_ext = fetch_cover(meta.cover_url)
     end
 
@@ -347,8 +368,8 @@ local function build(meta, chapters, output_path)
 
     add("mimetype",               "application/epub+zip")
     add("META-INF/container.xml", CONTAINER_XML)
-    add("OEBPS/content.opf",      make_opf(meta, chapters, cover_ext))
-    add("OEBPS/toc.ncx",          make_ncx(meta, chapters, cover_ext ~= nil))
+    add("OEBPS/content.opf",      make_opf(meta, chapters, cover_ext, live))
+    add("OEBPS/toc.ncx",          make_ncx(meta, chapters, cover_ext ~= nil, live))
     add("OEBPS/Styles/style.css", STYLESHEET)
 
     if cover_data then
@@ -356,10 +377,12 @@ local function build(meta, chapters, output_path)
         add("OEBPS/Text/cover.xhtml",           make_cover_xhtml(cover_ext))
     end
 
-    add("OEBPS/Text/synopsis.xhtml", make_synopsis_xhtml(meta))
+    if not live then
+        add("OEBPS/Text/synopsis.xhtml", make_synopsis_xhtml(meta))
 
-    if #chapters > 1 then
-        add("OEBPS/Text/toc.xhtml", make_toc_xhtml(meta, chapters))
+        if #chapters > 1 then
+            add("OEBPS/Text/toc.xhtml", make_toc_xhtml(meta, chapters))
+        end
     end
 
     for i, ch in ipairs(chapters) do
@@ -368,10 +391,16 @@ local function build(meta, chapters, output_path)
     end
 
     local f = io.open(output_path, "wb")
-    if not f then return false, "cannot_write: " .. output_path end
+    if not f then
+        if live then return false, nil end
+        return false, "cannot_write: " .. output_path
+    end
     write_zip(f, entries)
     f:close()
-    logger.dbg("Mythos/Epub: wrote", output_path)
+    logger.dbg("Inkstream/Epub: wrote", output_path)
+    if live then
+        return true, cover_data and 1 or 0
+    end
     return true
 end
 
@@ -385,8 +414,8 @@ end
 local function export(mode, options, chapters, fetch_fn, progress)
     local title     = options.title or "Novel"
     local safe      = title:gsub('[<>:"/\\|?*]', "_")
-    local out_dir   = options.out_dir or (mythos_base_dir() .. "/" .. safe)
-    logger.dbg("Mythos/Epub: export mode=", mode, "out_dir=", out_dir, "chapters=", #chapters)
+    local out_dir   = options.out_dir or (inkstream_base_dir() .. "/" .. safe)
+    logger.dbg("Inkstream/Epub: export mode=", mode, "out_dir=", out_dir, "chapters=", #chapters)
     mkdirp(out_dir)
 
     local base_meta = {
@@ -473,4 +502,5 @@ local function export(mode, options, chapters, fetch_fn, progress)
     return { exported = exported, errors = errors }
 end
 
-return { build = build, export = export, fetch_cover = fetch_cover }
+return { build = build, export = export, fetch_cover = fetch_cover, home_dir = home_dir,
+         mkdirp = mkdirp }

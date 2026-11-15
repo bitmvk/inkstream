@@ -12,10 +12,10 @@ local P           = require("ui.panel")
 local Export = {}
 
 local function close_all()
-    if _G.mythos_close_all then _G.mythos_close_all() end
+    if _G.inkstream_close_all then _G.inkstream_close_all() end
 end
 
-local function mythos_base_dir()
+local function inkstream_base_dir()
     local home = G_reader_settings and G_reader_settings:readSetting("home_dir")
     if not home or home == "" then
         local full = DataStorage:getFullDataDir() or DataStorage:getDataDir()
@@ -23,7 +23,7 @@ local function mythos_base_dir()
     end
     local Settings = require("settings")
     if Settings:get("export_location_flat") then return home end
-    return home .. "/Mythos"
+    return home .. "/Inkstream"
 end
 
 local MODES = {
@@ -50,8 +50,8 @@ function Export.run(ctx)
 
     local novel   = ctx.novel
     local title   = novel.name or novel.title or "Novel"
-    local out_dir = mythos_base_dir() .. "/" .. title:gsub('[<>:"/\\|?*]', "_")
-    logger.dbg("Mythos/Export: title=", title, "out_dir=", out_dir)
+    local out_dir = inkstream_base_dir() .. "/" .. title:gsub('[<>:"/\\|?*]', "_")
+    logger.dbg("Inkstream/Export: title=", title, "out_dir=", out_dir)
 
     -- Auto-track the novel when an export is started
     DB.track({
@@ -130,7 +130,7 @@ end
 -- ── Show ──────────────────────────────────────────────────────────────────────
 
 function Export.show(ctx)
-    local MythosUI = require("ui.main_widget")
+    local InkstreamUI = require("ui.main_widget")
     _ctx           = ctx
     local ch_cnt   = #(ctx.chapters or {})
     local Settings = require("settings")
@@ -207,7 +207,7 @@ function Export.show(ctx)
 
     -- Location toggle
     table.insert(rows, P.makeRow(
-        (not flat and "> " or "  ") .. "Home/Mythos/Series/Book.epub", {
+        (not flat and "> " or "  ") .. "Home/Inkstream/Series/Book.epub", {
             mandatory = "organised",
             bold      = not flat,
             callback  = function()
@@ -227,7 +227,7 @@ function Export.show(ctx)
         }
     ))
 
-    local out_dir = mythos_base_dir() .. "/"
+    local out_dir = inkstream_base_dir() .. "/"
         .. (ctx.novel.name or ctx.novel.title or "Novel"):gsub('[<>:"/\\|?*]', "_")
     table.insert(rows, P.makeRow("Output: " .. out_dir, { dim = true, callback = function() end }))
 
@@ -247,7 +247,7 @@ function Export.show(ctx)
     -- Close old panel before showing the new one
     if _panel then UIManager:close(_panel) end
     _panel = P.showSubPanel("Export Options", rows, on_back, close_all)
-    MythosUI.setExport(_panel)
+    InkstreamUI.setExport(_panel)
 end
 
 function Export.close()
@@ -255,8 +255,8 @@ function Export.close()
         UIManager:close(_panel)
         _panel = nil
     end
-    local ok, MythosUI = pcall(require, "ui.main_widget")
-    if ok then MythosUI.clearExport() end
+    local ok, InkstreamUI = pcall(require, "ui.main_widget")
+    if ok then InkstreamUI.clearExport() end
 end
 
 return Export

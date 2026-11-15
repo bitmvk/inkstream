@@ -1,5 +1,5 @@
--- core/updater.lua — Mythos manual OTA updater
--- Checks GitHub releases API, downloads mythos.koplugin.zip, unzips in-place,
+-- core/updater.lua — Inkstream manual OTA updater
+-- Checks GitHub releases API, downloads inkstream.koplugin.zip, unzips in-place,
 -- deletes the zip, then offers a KOReader restart.
 
 local UIManager   = require("ui/uimanager")
@@ -10,22 +10,22 @@ local logger      = require("logger")
 
 local Updater = {}
 
-local GITHUB_OWNER = "unitreign"
-local GITHUB_REPO  = "mythos"
-local ASSET_NAME   = "mythos.koplugin.zip"
-local API_URL      = "https://api.github.com/repos/unitreign/mythos/releases/latest"
+local GITHUB_OWNER = "bitmvk"
+local GITHUB_REPO  = "inkstream"
+local ASSET_NAME   = "inkstream.koplugin.zip"
+local API_URL      = "https://api.github.com/repos/bitmvk/inkstream/releases/latest"
 
 -- core/ directory (where this file lives)
 local _core_dir   = (debug.getinfo(1, "S").source or ""):match("^@?(.+)/[^/]+%.lua$") or ""
--- mythos.koplugin/ — one level up from core/
+-- inkstream.koplugin/ — one level up from core/
 local _plugin_dir = _core_dir:match("^(.+)/[^/]+$") or _core_dir
--- plugins/ directory — one level up from mythos.koplugin/; zip extracts here
+-- plugins/ directory — one level up from inkstream.koplugin/; zip extracts here
 local _parent_dir = _plugin_dir:match("^(.+)/[^/]+$") or _plugin_dir
 
 -- ── Version helpers ───────────────────────────────────────────────────────────
 
 local function current_version()
-    return _G.MYTHOS_VERSION or "0.0.0"
+    return _G.INKSTREAM_VERSION or "0.0.0"
 end
 
 -- Returns true if semver string a is strictly greater than b.
@@ -53,7 +53,7 @@ local function _request(url, sink, extra_headers)
     local http  = require("socket.http")
     local ltn12 = require("ltn12")
     local req   = url:match("^https") and https or http
-    local headers = { ["User-Agent"] = "KOReader-Mythos-Updater" }
+    local headers = { ["User-Agent"] = "KOReader-Inkstream-Updater" }
     if extra_headers then
         for k, v in pairs(extra_headers) do headers[k] = v end
     end
@@ -71,7 +71,7 @@ local function http_get(url)
     local ok, code = _request(url, ltn12.sink.table(sink), {
         ["Accept"] = "application/vnd.github.v3+json",
     })
-    logger.dbg("Mythos/Updater: GET", url, "→", tostring(code))
+    logger.dbg("Inkstream/Updater: GET", url, "→", tostring(code))
     if not ok or code ~= 200 then return nil, tostring(code) end
     return table.concat(sink)
 end
@@ -83,7 +83,7 @@ local function http_download(url, dest)
     -- First request: may return 302 with a Location header.
     local headers_only = {}
     local ok, code, resp_headers = _request(url, ltn12.sink.table(headers_only), nil)
-    logger.dbg("Mythos/Updater: download probe", url, "→", tostring(code))
+    logger.dbg("Inkstream/Updater: download probe", url, "→", tostring(code))
 
     local final_url = url
     if code == 301 or code == 302 or code == 303 or code == 307 or code == 308 then
@@ -91,7 +91,7 @@ local function http_download(url, dest)
         if not location then
             return nil, "redirect with no Location header"
         end
-        logger.dbg("Mythos/Updater: following redirect →", location)
+        logger.dbg("Inkstream/Updater: following redirect →", location)
         final_url = location
     elseif not ok or code ~= 200 then
         return nil, tostring(code)
@@ -102,7 +102,7 @@ local function http_download(url, dest)
     if not fh then return nil, "cannot open dest: " .. tostring(err) end
     local ok2, code2 = _request(final_url, ltn12.sink.file(fh), nil)
     -- ltn12.sink.file closes fh automatically
-    logger.dbg("Mythos/Updater: download stream", final_url, "→", tostring(code2))
+    logger.dbg("Inkstream/Updater: download stream", final_url, "→", tostring(code2))
     if not ok2 or code2 ~= 200 then
         pcall(os.remove, dest)
         return nil, tostring(code2)
@@ -132,7 +132,7 @@ local function parse_release(body)
 
         local notes
         local raw = data.body or ""
-        local block = raw:match("<!%-%-himythos%-%->(.-)<!%-%-/himythos%-%->")
+        local block = raw:match("<!%-%-hiinkstream%-%->(.-)<!%-%-/hiinkstream%-%->")
         if block and block:match("%S") then
             notes = block:gsub("\r\n", "\n"):gsub("\r", "\n"):match("^%s*(.-)%s*$")
         end
@@ -145,7 +145,7 @@ local function parse_release(body)
     end
 
     -- json module unavailable — regex fallback
-    logger.warn("Mythos/Updater: json unavailable, using regex fallback")
+    logger.warn("Inkstream/Updater: json unavailable, using regex fallback")
     local tag = body:match('"tag_name"%s*:%s*"([^"]*)"')
     if not tag then return nil, "could not parse tag_name" end
     local asset_pat = '"browser_download_url"%s*:%s*"([^"]*'
@@ -153,7 +153,7 @@ local function parse_release(body)
     local raw_body = body:match('"body"%s*:%s*"(.-[^\\])"') or ""
     raw_body = raw_body:gsub("\\n", "\n"):gsub("\\r", ""):gsub('\\"', '"')
     local fb_notes
-    local fb_block = raw_body:match("<!%-%-himythos%-%->(.-)<!%-%-/himythos%-%->")
+    local fb_block = raw_body:match("<!%-%-hiinkstream%-%->(.-)<!%-%-/hiinkstream%-%->")
     if fb_block and fb_block:match("%S") then
         fb_notes = fb_block:match("^%s*(.-)%s*$")
     end
@@ -168,15 +168,15 @@ end
 
 local function tmp_zip_path()
     local candidates = {
-        DataStorage:getSettingsDir() .. "/mythos_update.zip",
-        "/tmp/mythos_update.zip",
-        _plugin_dir .. "/mythos_update.zip",
+        DataStorage:getSettingsDir() .. "/inkstream_update.zip",
+        "/tmp/inkstream_update.zip",
+        _plugin_dir .. "/inkstream_update.zip",
     }
     for _, path in ipairs(candidates) do
         local fh = io.open(path, "wb")
         if fh then fh:close(); os.remove(path); return path end
     end
-    return _plugin_dir .. "/mythos_update.zip"
+    return _plugin_dir .. "/inkstream_update.zip"
 end
 
 -- ── Install ───────────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ local function apply_update(download_url, new_version)
     local zip = tmp_zip_path()
 
     local progress = InfoMessage:new{
-        text    = "Downloading Mythos v" .. new_version .. "…",
+        text    = "Downloading Inkstream v" .. new_version .. "…",
         timeout = 120,
     }
     UIManager:show(progress)
@@ -195,7 +195,7 @@ local function apply_update(download_url, new_version)
         UIManager:close(progress)
 
         if not dl_ok then
-            logger.err("Mythos/Updater: download failed:", dl_err)
+            logger.err("Inkstream/Updater: download failed:", dl_err)
             UIManager:show(InfoMessage:new{
                 text    = "Download failed: " .. tostring(dl_err),
                 timeout = 5,
@@ -203,14 +203,14 @@ local function apply_update(download_url, new_version)
             return
         end
 
-        logger.dbg("Mythos/Updater: unzipping", zip, "→", _parent_dir)
+        logger.dbg("Inkstream/Updater: unzipping", zip, "→", _parent_dir)
         local ret = os.execute(
             string.format("unzip -o -q %q -d %q", zip, _parent_dir)
         )
         os.remove(zip)
 
         if ret ~= 0 and ret ~= true then
-            logger.err("Mythos/Updater: unzip failed, exit=", tostring(ret))
+            logger.err("Inkstream/Updater: unzip failed, exit=", tostring(ret))
             UIManager:show(InfoMessage:new{
                 text    = "Extraction failed. Please update manually.",
                 timeout = 5,
@@ -218,9 +218,9 @@ local function apply_update(download_url, new_version)
             return
         end
 
-        logger.info("Mythos/Updater: update to", new_version, "installed")
+        logger.info("Inkstream/Updater: update to", new_version, "installed")
         UIManager:show(ConfirmBox:new{
-            text        = "Mythos v" .. new_version
+            text        = "Inkstream v" .. new_version
                        .. " installed.\n\nRestart KOReader to apply the update?",
             ok_text     = "Restart now",
             cancel_text = "Later",
@@ -242,7 +242,7 @@ function Updater.checkForUpdates()
             UIManager:close(checking)
 
             if not body then
-                logger.err("Mythos/Updater: fetch failed:", fetch_err)
+                logger.err("Inkstream/Updater: fetch failed:", fetch_err)
                 UIManager:show(InfoMessage:new{
                     text    = "Could not reach GitHub: " .. tostring(fetch_err),
                     timeout = 4,
@@ -252,7 +252,7 @@ function Updater.checkForUpdates()
 
             local release, parse_err = parse_release(body)
             if not release then
-                logger.err("Mythos/Updater: parse failed:", parse_err)
+                logger.err("Inkstream/Updater: parse failed:", parse_err)
                 UIManager:show(InfoMessage:new{
                     text    = "Could not read release info.",
                     timeout = 4,
@@ -261,11 +261,11 @@ function Updater.checkForUpdates()
             end
 
             local current = current_version()
-            logger.info("Mythos/Updater: current=", current, "latest=", release.version)
+            logger.info("Inkstream/Updater: current=", current, "latest=", release.version)
 
             if not version_gt(release.version, current) then
                 UIManager:show(InfoMessage:new{
-                    text    = "Mythos is up to date (v" .. current .. ").",
+                    text    = "Inkstream is up to date (v" .. current .. ").",
                     timeout = 3,
                 })
                 return
@@ -273,14 +273,14 @@ function Updater.checkForUpdates()
 
             if not release.download_url then
                 UIManager:show(InfoMessage:new{
-                    text    = "Mythos v" .. release.version
+                    text    = "Inkstream v" .. release.version
                            .. " is available but has no download file yet.",
                     timeout = 5,
                 })
                 return
             end
 
-            local header = "Mythos v" .. release.version .. " is available!\n"
+            local header = "Inkstream v" .. release.version .. " is available!\n"
                         .. "You have v" .. current .. "."
             local notes  = release.notes
                         and ("\n\nWhat's new:\n" .. release.notes)

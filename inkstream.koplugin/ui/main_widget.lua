@@ -7,45 +7,45 @@
 -- reveals whatever was underneath automatically via UIManager.
 local UIManager = require("ui/uimanager")
 
-local MythosUI = {}
+local InkstreamUI = {}
 
-MythosUI.active_tab = "library"
+InkstreamUI.active_tab = "library"
 
 -- Filled by main.lua — each returns (rows, title, nav) for its tab
-MythosUI.get_library_rows = nil
-MythosUI.get_browse_rows  = nil
-MythosUI.get_sources_rows = nil
+InkstreamUI.get_library_rows = nil
+InkstreamUI.get_browse_rows  = nil
+InkstreamUI.get_sources_rows = nil
 
 local _panel  = nil  -- level 1: main tab panel (persistent)
 local _detail = nil  -- level 2: detail / source-settings sub-screen
 local _export = nil  -- level 3: export sub-screen
 
 local function close_fn()
-    if _G.mythos_close_all then _G.mythos_close_all() end
+    if _G.inkstream_close_all then _G.inkstream_close_all() end
 end
 
 -- ── Level 1: main tab ─────────────────────────────────────────────────────────
 
-function MythosUI.show(tab)
+function InkstreamUI.show(tab)
     if _export then UIManager:close(_export); _export = nil end
     if _detail then UIManager:close(_detail); _detail = nil end
 
-    local same_tab = _panel ~= nil and MythosUI.active_tab == (tab or "library")
-    MythosUI.active_tab = tab or "library"
+    local same_tab = _panel ~= nil and InkstreamUI.active_tab == (tab or "library")
+    InkstreamUI.active_tab = tab or "library"
 
     local rows, title, nav
-    if MythosUI.active_tab == "library" and MythosUI.get_library_rows then
-        rows, title, nav = MythosUI.get_library_rows()
-    elseif MythosUI.active_tab == "browse" and MythosUI.get_browse_rows then
-        rows, title, nav = MythosUI.get_browse_rows()
-    elseif MythosUI.active_tab == "sources" and MythosUI.get_sources_rows then
-        rows, title, nav = MythosUI.get_sources_rows()
+    if InkstreamUI.active_tab == "library" and InkstreamUI.get_library_rows then
+        rows, title, nav = InkstreamUI.get_library_rows()
+    elseif InkstreamUI.active_tab == "browse" and InkstreamUI.get_browse_rows then
+        rows, title, nav = InkstreamUI.get_browse_rows()
+    elseif InkstreamUI.active_tab == "sources" and InkstreamUI.get_sources_rows then
+        rows, title, nav = InkstreamUI.get_sources_rows()
     end
 
     if not rows then
         local InfoMessage = require("ui/widget/infomessage")
         UIManager:show(InfoMessage:new{
-            text    = "Tab not ready: " .. tostring(MythosUI.active_tab),
+            text    = "Tab not ready: " .. tostring(InkstreamUI.active_tab),
             timeout = 2,
         })
         return
@@ -53,53 +53,53 @@ function MythosUI.show(tab)
 
     local P = require("ui.panel")
     if _panel then
-        _panel:swapBody(P.buildTabBody(MythosUI.active_tab, rows, title, close_fn, nav), close_fn, same_tab)
+        _panel:swapBody(P.buildTabBody(InkstreamUI.active_tab, rows, title, close_fn, nav), close_fn, same_tab)
     else
-        _panel = P.showTabPanel(MythosUI.active_tab, rows, title, close_fn, nav)
+        _panel = P.showTabPanel(InkstreamUI.active_tab, rows, title, close_fn, nav)
     end
 end
 
 -- ── Level 2: detail panel ─────────────────────────────────────────────────────
 
-function MythosUI.setDetail(widget)
+function InkstreamUI.setDetail(widget)
     if _export then UIManager:close(_export); _export = nil end
     if _detail then UIManager:close(_detail) end
     _detail = widget
 end
 
-function MythosUI.clearDetail()
+function InkstreamUI.clearDetail()
     if _export then UIManager:close(_export); _export = nil end
     _detail = nil
 end
 
 -- ── Level 3: export panel ─────────────────────────────────────────────────────
 
-function MythosUI.setExport(widget)
+function InkstreamUI.setExport(widget)
     if _export then UIManager:close(_export) end
     _export = widget
 end
 
-function MythosUI.clearExport()
+function InkstreamUI.clearExport()
     _export = nil
 end
 
 -- ── Legacy aliases ────────────────────────────────────────────────────────────
 
-function MythosUI.showSub(widget)
-    MythosUI.setDetail(widget)
+function InkstreamUI.showSub(widget)
+    InkstreamUI.setDetail(widget)
 end
 
-function MythosUI.backFromSub()
+function InkstreamUI.backFromSub()
     if _export then UIManager:close(_export); _export = nil end
     if _detail then UIManager:close(_detail); _detail = nil end
 end
 
 -- ── Close everything ──────────────────────────────────────────────────────────
 
-function MythosUI.close()
+function InkstreamUI.close()
     if _export then UIManager:close(_export); _export = nil end
     if _detail then UIManager:close(_detail); _detail = nil end
     if _panel  then UIManager:close(_panel);  _panel  = nil end
 end
 
-return MythosUI
+return InkstreamUI

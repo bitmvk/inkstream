@@ -1,5 +1,5 @@
 -- JSON-based persistence for tracked novels.
--- Stored at: <koreader_settings>/mythos/tracked.json
+-- Stored at: <koreader_settings>/inkstream/tracked.json
 local DataStorage = require("datastorage")
 local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
 if not ok_lfs then lfs = require("lfs") end
@@ -8,16 +8,14 @@ if not ok_json then JSON = require("json") end
 
 local DB = {}
 
-local db_dir      = DataStorage:getSettingsDir() .. "/mythos"
+local db_dir      = DataStorage:getSettingsDir() .. "/inkstream"
 local db_path     = db_dir .. "/tracked.json"
 local exports_path = db_dir .. "/exports.json"
 local _data    = nil  -- lazy loaded
 local _exports = nil  -- lazy loaded
 
 local function ensure_dir()
-    if lfs.attributes(db_dir, "mode") ~= "directory" then
-        lfs.mkdir(db_dir)
-    end
+    require("core.epub").mkdirp(db_dir)
 end
 
 local function load()
@@ -198,16 +196,12 @@ local cover_cache_dir   = db_dir .. "/covers"
 
 local function ensure_chapter_cache_dir()
     ensure_dir()
-    if lfs.attributes(chapter_cache_dir, "mode") ~= "directory" then
-        lfs.mkdir(chapter_cache_dir)
-    end
+    require("core.epub").mkdirp(chapter_cache_dir)
 end
 
 local function ensure_cover_cache_dir()
     ensure_dir()
-    if lfs.attributes(cover_cache_dir, "mode") ~= "directory" then
-        lfs.mkdir(cover_cache_dir)
-    end
+    require("core.epub").mkdirp(cover_cache_dir)
 end
 
 local function cache_key(source_id, novel_path)

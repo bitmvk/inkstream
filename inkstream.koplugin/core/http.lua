@@ -1,4 +1,4 @@
--- Thin HTTP/HTTPS client for Mythos extensions.
+-- Thin HTTP/HTTPS client for Inkstream extensions.
 -- Returns body string on success, nil+code on failure.
 local https   = require("ssl.https")
 local http    = require("socket.http")

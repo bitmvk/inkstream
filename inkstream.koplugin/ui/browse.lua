@@ -48,14 +48,14 @@ local function open_search()
 end
 
 local function build_source_picker_rows()
-    local MythosUI  = require("ui.main_widget")
+    local InkstreamUI  = require("ui.main_widget")
     local installed = ExtMgr.installed()
     local rows = {}
 
     if #installed == 0 then
         table.insert(rows, P.makeRow("No sources installed — go to Sources tab", {
             dim = true,
-            callback = function() MythosUI.show("sources") end,
+            callback = function() InkstreamUI.show("sources") end,
         }))
         return rows, "Browse"
     end

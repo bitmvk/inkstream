@@ -13,7 +13,7 @@ local Sources = {}
 local _page = 1
 
 local function close_all()
-    if _G.mythos_close_all then _G.mythos_close_all() end
+    if _G.inkstream_close_all then _G.inkstream_close_all() end
 end
 
 local function rebuild()
@@ -23,13 +23,13 @@ end
 -- ── Extension settings sub-panel ─────────────────────────────────────────────
 
 function Sources.ext_settings(meta)
-    local MythosUI = require("ui.main_widget")
+    local InkstreamUI = require("ui.main_widget")
     local ext      = ExtMgr.get(meta.id)
     local sp       = {}  -- {[1] = panel ref} — filled after P.showSubPanel
 
     local function close_settings()
         if sp[1] then UIManager:close(sp[1]); sp[1] = nil end
-        MythosUI.clearDetail()
+        InkstreamUI.clearDetail()
     end
 
     local rows = {
@@ -64,7 +64,7 @@ function Sources.ext_settings(meta)
 
     local p = P.showSubPanel(meta.name .. " — Settings", rows, close_settings, close_all)
     sp[1] = p
-    MythosUI.setDetail(p)
+    InkstreamUI.setDetail(p)
 end
 
 -- ── Widget builder ────────────────────────────────────────────────────────────

@@ -10,71 +10,71 @@ local Settings = require("settings")
 
 local ExtMgr = {}
 
-local ext_dir   = DataStorage:getSettingsDir() .. "/mythos/extensions"
-local meta_path = DataStorage:getSettingsDir() .. "/mythos/ext_meta.json"
+local ext_dir   = DataStorage:getSettingsDir() .. "/inkstream/extensions"
+local meta_path = DataStorage:getSettingsDir() .. "/inkstream/ext_meta.json"
 
 local _loaded     = {}   -- id -> live extension table
 local _inst_meta  = {}   -- id -> metadata of installed extensions
 local _avail      = {}   -- id -> metadata from remote index
+local _inited     = false  -- init() has run (extensions loaded) at least once
 
 -- ── Internal helpers ─────────────────────────────────────────────────────────
 
 local function ensure_dir()
-    logger.dbg("Mythos/ExtMgr: ensure_dir ext_dir=", ext_dir)
+    logger.dbg("Inkstream/ExtMgr: ensure_dir ext_dir=", ext_dir)
     if lfs.attributes(ext_dir, "mode") ~= "directory" then
-        logger.dbg("Mythos/ExtMgr: creating mythos dirs")
-        lfs.mkdir(DataStorage:getSettingsDir() .. "/mythos")
-        lfs.mkdir(ext_dir)
+        logger.dbg("Inkstream/ExtMgr: creating inkstream dirs")
+        require("core.epub").mkdirp(ext_dir)
     end
 end
 
 local function load_inst_meta()
-    logger.dbg("Mythos/ExtMgr: load_inst_meta from", meta_path)
+    logger.dbg("Inkstream/ExtMgr: load_inst_meta from", meta_path)
     local f = io.open(meta_path, "r")
     if not f then
-        logger.warn("Mythos/ExtMgr: ext_meta.json not found at", meta_path)
+        logger.warn("Inkstream/ExtMgr: ext_meta.json not found at", meta_path)
         return {}
     end
     local raw = f:read("*all")
     f:close()
-    logger.dbg("Mythos/ExtMgr: ext_meta.json raw=", raw)
+    logger.dbg("Inkstream/ExtMgr: ext_meta.json raw=", raw)
     local ok, data = pcall(JSON.decode, raw)
     if not ok then
-        logger.err("Mythos/ExtMgr: JSON decode failed:", tostring(data))
+        logger.err("Inkstream/ExtMgr: JSON decode failed:", tostring(data))
         return {}
     end
     local count = 0
     for _ in pairs(data) do count = count + 1 end
-    logger.dbg("Mythos/ExtMgr: loaded", count, "ext meta entries")
+    logger.dbg("Inkstream/ExtMgr: loaded", count, "ext meta entries")
     return data
 end
 
 local function save_inst_meta()
     local f = io.open(meta_path, "w")
     if not f then
-        logger.err("Mythos/ExtMgr: cannot write ext_meta.json")
+        logger.err("Inkstream/ExtMgr: cannot write ext_meta.json")
         return
     end
     f:write(JSON.encode(_inst_meta))
     f:close()
-    logger.dbg("Mythos/ExtMgr: saved ext_meta.json")
+    logger.dbg("Inkstream/ExtMgr: saved ext_meta.json")
 end
 
 local function load_ext_file(id)
     local path = ext_dir .. "/" .. id .. ".lua"
-    logger.dbg("Mythos/ExtMgr: load_ext_file id=", id, "path=", path)
+    logger.dbg("Inkstream/ExtMgr: load_ext_file id=", id, "path=", path)
     local attr = lfs.attributes(path, "mode")
     if attr ~= "file" then
-        logger.warn("Mythos/ExtMgr: extension file not found:", path, "(mode=", tostring(attr), ")")
+        logger.warn("Inkstream/ExtMgr: extension file not found:", path, "(mode=", tostring(attr), ")")
         return nil
     end
     local ok, ext = pcall(dofile, path)
     if ok and type(ext) == "table" then
         _loaded[id] = ext
-        logger.dbg("Mythos/ExtMgr: loaded extension", id, "ok")
+        logger.dbg("Inkstream/ExtMgr: loaded extension", id, "ok")
         return ext
     end
-    logger.err("Mythos/ExtMgr: dofile failed for", id, ":", tostring(ext))
+    logger.err("Inkstream/ExtMgr: dofile failed for", id, ":", tostring(ext))
     return nil
 end
 
@@ -95,18 +95,29 @@ end
 -- ── Public API ────────────────────────────────────────────────────────────────
 
 function ExtMgr.init()
-    logger.dbg("Mythos/ExtMgr: init()")
+    if _inited then return end
+    logger.dbg("Inkstream/ExtMgr: init()")
     ensure_dir()
     _inst_meta = load_inst_meta()
     for id in pairs(_inst_meta) do
-        logger.dbg("Mythos/ExtMgr: init loading", id)
+        logger.dbg("Inkstream/ExtMgr: init loading", id)
         load_ext_file(id)
     end
-    logger.dbg("Mythos/ExtMgr: init done. loaded:", (function()
+    _inited = true
+    logger.dbg("Inkstream/ExtMgr: init done. loaded:", (function()
         local ids = {}
         for k in pairs(_loaded) do table.insert(ids, k) end
         return table.concat(ids, ", ")
     end)())
+end
+
+-- Load installed extensions exactly once (idempotent). Call this in the
+-- parent process before forking a fetch subprocess, so the child inherits the
+-- loaded extension tables via fork(); this matters when a live book is opened
+-- straight from the file browser, where open_inkstream() never runs.
+function ExtMgr.ensure_init()
+    ExtMgr.init()
+    return _inited
 end
 
 -- Return a live extension instance by id, or nil
@@ -158,7 +169,7 @@ function ExtMgr.fetchIndex()
         local resolved, fallback = resolve_index_url(url)
         local data = Http.getJson(resolved)
         if not data and fallback then
-            logger.dbg("Mythos/ExtMgr: main branch failed, trying master for", url)
+            logger.dbg("Inkstream/ExtMgr: main branch failed, trying master for", url)
             data = Http.getJson(fallback)
         end
         if data and type(data) == "table" then

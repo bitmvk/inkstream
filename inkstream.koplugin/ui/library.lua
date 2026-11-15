@@ -44,6 +44,21 @@ local function do_refresh_confirmed()
                             DB.update(novel.source_id, novel.path, { total_chapters = new_total })
                             updated = updated + 1
                         end
+                        -- Full-mode live novels: fresh chapter cache and
+                        -- download the new chapters in the background.
+                        if new_total > 0 and new_total > (novel.total_chapters or 0) then
+                            local LiveBook = require("core.livebook")
+                            local state = LiveBook.state_for(novel.source_id, novel.path)
+                            if state and state.mode == "full" then
+                                DB.saveChapterCache(novel.source_id, novel.path,
+                                    info.chapters, new_total)
+                                state.total = new_total
+                                LiveBook.save_state(state)
+                                local Downloader = require("core.downloader")
+                                Downloader.enqueue(state.key)
+                                Downloader.tick()
+                            end
+                        end
                     end
                 end
             end
@@ -70,7 +85,7 @@ local function do_refresh()
 end
 
 function Library.build_rows()
-    local MythosUI = require("ui.main_widget")
+    local InkstreamUI = require("ui.main_widget")
 
     local novels = DB.getByFilter("all")
 
@@ -87,7 +102,7 @@ function Library.build_rows()
     if #novels == 0 then
         table.insert(novel_rows, P.makeRow("No novels tracked yet — go to Browse", {
             dim = true,
-            callback = function() MythosUI.show("browse") end,
+            callback = function() InkstreamUI.show("browse") end,
         }))
     else
         for _, n in ipairs(novels) do
@@ -146,7 +161,7 @@ function Library.build_rows()
         on_next   = _page < max_pages and function() _page = _page + 1; rebuild() end or nil,
     } or nil
 
-    return all_rows, "MYTHOS", nav
+    return all_rows, "INKSTREAM", nav
 end
 
 function Library.close() end

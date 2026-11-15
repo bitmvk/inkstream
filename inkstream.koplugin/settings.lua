@@ -1,4 +1,4 @@
--- Settings singleton for Mythos.
+-- Settings singleton for Inkstream.
 -- All keys are lazy-loaded; file is only written when a value changes.
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
@@ -9,6 +9,13 @@ local DEFAULTS = {
     covers_detail   = true,
     repos           = {},
     extension_settings = {},
+    -- Folder for live-reading EPUBs (nil = KOReader home folder).
+    live_books_dir  = nil,
+    -- How new live books are started: "ask" | "window" | "full".
+    book_mode       = "ask",
+    -- Chapters per volume in full mode (applies to novels started after the
+    -- change; existing novels keep their state.volume_size).
+    volume_size     = 200,
 }
 
 local Settings = {}
@@ -16,7 +23,7 @@ local _file = nil
 
 local function get_file()
     if not _file then
-        _file = LuaSettings:open(DataStorage:getSettingsDir() .. "/mythos.lua")
+        _file = LuaSettings:open(DataStorage:getSettingsDir() .. "/inkstream.lua")
     end
     return _file
 end

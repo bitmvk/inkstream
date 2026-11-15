@@ -1,4 +1,4 @@
--- Shared Mythos UI: FullScreenPanel base + row/header/tab helpers.
+-- Shared Inkstream UI: FullScreenPanel base + row/header/tab helpers.
 -- All screens are built as ONE FullScreenPanel widget shown via UIManager,
 -- so tab bar and content share a single widget tree with no z-order issues.
 
@@ -207,7 +207,7 @@ function AboutWidget:init()
     local BOX_W   = math.floor(W * 0.85)
     local PADDING = Screen:scaleBySize(28)
     local INNER_W = BOX_W - 2 * PADDING
-    local version = _G.MYTHOS_VERSION or "0.1.0"
+    local version = _G.INKSTREAM_VERSION or "0.1.0"
 
     -- ── Logo ──────────────────────────────────────────────────────────────────
     local logo_w = nil
@@ -247,7 +247,7 @@ function AboutWidget:init()
         group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(14) }
     end
     group_args[#group_args + 1] = TextWidget:new{
-        text = "Mythos",
+        text = "Inkstream",
         face = Font:getFace("cfont", 24),
         bold = true,
     }
@@ -261,7 +261,7 @@ function AboutWidget:init()
     group_args[#group_args + 1] = desc
     group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(16) }
     group_args[#group_args + 1] = TextWidget:new{
-        text    = "github.com/unitreign/Mythos",
+        text    = "github.com/bitmvk/inkstream",
         face    = Font:getFace("cfont", 13),
         fgcolor = Blitbuffer.COLOR_GRAY,
     }
@@ -332,7 +332,7 @@ function P.showHamburgerMenu(close_fn)
                 require("core.updater").checkForUpdates()
             end,
         },
-        { "Quit Mythos", function()
+        { "Quit Inkstream", function()
             close_menu()
             close_fn()
         end },
