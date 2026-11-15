@@ -1,32 +1,31 @@
--- Browse tab: source picker → novel list.
+-- Browse screen: source picker → per-source Popular list → search results.
+-- Each list screen is a closure over its own context (source, page, search
+-- term, results), so back navigation rebuilds the right screen. The source
+-- API is paged without a known total, so site pages are list rows: a bold
+-- "Search…" row, a "← Previous page" row when page > 1, then the novels, and
+-- a "Next page" row last. The root picker lists installed sources and ends
+-- with a "Manage sources…" row that pushes the Sources screen.
 local UIManager   = require("ui/uimanager")
 local InputDialog = require("ui/widget/inputdialog")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr  = require("ui/network/manager")
 local ExtMgr      = require("core.extmgr")
-local P           = require("ui.panel")
 
 local Browse = {}
 Browse.on_novel_tap = nil
 
-Browse._state     = "picker"
-Browse._source_id = nil
-Browse._novels    = {}
-Browse._page      = 1
-Browse._search    = nil
-
 local _fetch_id = 0
 
-local function rebuild()
-    require("ui.main_widget").show("browse")
+-- Builder closure for a pushed list screen (Popular or search results).
+function Browse.list_builder(ctx)
+    return function() return Browse.build_list_screen(ctx) end
 end
 
-local function open_search()
-    local sid  = Browse._source_id
-    local meta = ExtMgr.getMeta(sid) or {}
+function Browse.open_search(ctx)
+    local meta = ExtMgr.getMeta(ctx.source_id) or {}
     local dlg
     dlg = InputDialog:new{
-        title      = "Search — " .. (meta.name or sid),
+        title      = "Search — " .. (meta.name or ctx.source_id),
         input_hint = "Novel title...",
         buttons    = {{
             {
@@ -36,8 +35,14 @@ local function open_search()
                     local term = dlg:getInputText()
                     UIManager:close(dlg)
                     if term and term ~= "" then
-                        Browse._search = term
-                        Browse.fetchAndShow(sid, 1, term)
+                        local sctx = {
+                            source_id = ctx.source_id,
+                            page      = 1,
+                            search    = term,
+                            novels    = {},
+                        }
+                        require("ui.main_widget").push(Browse.list_builder(sctx))
+                        Browse.fetch_list(sctx, 1, term)
                     end
                 end,
             },
@@ -47,116 +52,107 @@ local function open_search()
     UIManager:show(dlg)
 end
 
-local function build_source_picker_rows()
-    local InkstreamUI  = require("ui.main_widget")
-    local installed = ExtMgr.installed()
-    local rows = {}
-
-    if #installed == 0 then
-        table.insert(rows, P.makeRow("No sources installed — go to Sources tab", {
-            dim = true,
-            callback = function() InkstreamUI.show("sources") end,
-        }))
-        return rows, "Browse"
-    end
-
-    table.insert(rows, P.makeRow("-- Installed Sources --", { dim = true, callback = function() end }))
-    for _, meta in ipairs(installed) do
-        local m = meta
-        table.insert(rows, P.makeRow(m.name, {
-            mandatory = m.lang or "en",
-            bold      = true,
-            callback  = function()
-                Browse._source_id = m.id
-                Browse._search    = nil
-                Browse.fetchAndShow(m.id, 1, nil)
-            end,
-        }))
-    end
-    return rows, "Browse"
-end
-
-local function build_novel_list_rows()
-    local source_id = Browse._source_id
-    local novels    = Browse._novels
-    local page      = Browse._page
-    local is_search = Browse._search ~= nil
+function Browse.build_list_screen(ctx)
+    local source_id = ctx.source_id
+    local novels    = ctx.novels or {}
     local meta      = ExtMgr.getMeta(source_id) or {}
-    local rows      = {}
+    local is_search = ctx.search ~= nil
 
-    -- Search / back row
-    table.insert(rows, P.makeRow(
-        is_search and ("Search  (\"" .. Browse._search .. "\")") or "Search", {
-            bold = true, callback = open_search,
-        }
-    ))
-    table.insert(rows, P.makeRow("← Back to Source Select", {
-        bold = true,
-        callback = function()
-            Browse._state = "picker"
-            rebuild()
-        end,
-    }))
-    table.insert(rows, P.hairline())
+    local items = {}
 
-    -- Trim novel list to fit content area with the nav bar present
-    local fixed_h        = 2 * P.ROW_H + P.HAIRLINE  -- Search + Back + hairline
-    local max_novel_rows = math.max(1, math.floor((P.CONTENT_H_NAV - fixed_h) / P.ROW_H))
+    -- First row: search this source (the former ☰ action).
+    table.insert(items, {
+        text     = "Search…",
+        bold     = true,
+        callback = function() Browse.open_search(ctx) end,
+    })
+
+    -- Site pages are list rows, so they don't get confused with the Menu
+    -- footer, which only pages through the results already loaded.
+    if ctx.page > 1 then
+        table.insert(items, {
+            text     = "← Previous page (" .. (ctx.page - 1) .. ")",
+            bold     = true,
+            callback = function() Browse.fetch_list(ctx, ctx.page - 1, ctx.search) end,
+        })
+    end
 
     if #novels == 0 then
-        table.insert(rows, P.makeRow("No results", { dim = true, callback = function() end }))
+        table.insert(items, { text = "No results", dim = true })
     else
-        for i = 1, math.min(#novels, max_novel_rows) do
-            local novel = novels[i]
-            table.insert(rows, P.makeRow(novel.name or novel.title or "?", {
-                mandatory = novel.author or "",
+        for _, novel in ipairs(novels) do
+            local n = novel
+            table.insert(items, {
+                text      = require("ui.main_widget").two_lines(n.name or n.title or "?", n.author),
                 callback  = function()
-                    if Browse.on_novel_tap then Browse.on_novel_tap(source_id, novel) end
+                    if Browse.on_novel_tap then Browse.on_novel_tap(source_id, n) end
                 end,
-            }))
+            })
         end
     end
 
-    -- Nav bar handles prev/next for the source's own API pages
-    local nav = {
-        page    = page,
-        on_prev = page > 1 and function()
-            Browse.fetchAndShow(source_id, page - 1, Browse._search)
-        end or nil,
-        on_next = function()
-            Browse.fetchAndShow(source_id, page + 1, Browse._search)
-        end,
-    }
+    table.insert(items, {
+        text     = "Next page (" .. (ctx.page + 1) .. ") →",
+        bold     = true,
+        callback = function() Browse.fetch_list(ctx, ctx.page + 1, ctx.search) end,
+    })
 
     local title = (meta.name or source_id)
-        .. (is_search and ("  —  \"" .. Browse._search .. "\"") or "  —  Popular")
+        .. (is_search and ("  —  \"" .. ctx.search .. "\"") or "  —  Popular")
 
-    return rows, title, nav
+    return { title = title, items = items, items_per_page = 8 }
 end
 
-function Browse.build_rows()
-    local rows, title, nav
-    if Browse._state == "list" then
-        rows, title, nav = build_novel_list_rows()
-    else
-        Browse._state = "picker"
-        rows, title   = build_source_picker_rows()
-    end
-
-    -- Trim rows to MAX_ROWS for source picker (no nav bar there)
-    local visible = {}
-    for i = 1, math.min(#rows, nav and P.MAX_ROWS_NAV or P.MAX_ROWS) do
-        table.insert(visible, rows[i])
-    end
-
-    return visible, title, nav
+local function push_sources()
+    require("ui.main_widget").push(function() return require("ui.sources").build_screen() end)
 end
 
-function Browse.fetchAndShow(source_id, page, search_term)
-    local ext = ExtMgr.get(source_id)
+function Browse.build_picker_screen()
+    local InkstreamUI = require("ui.main_widget")
+    local installed   = ExtMgr.installed()
+    local items       = {}
+
+    if #installed == 0 then
+        table.insert(items, {
+            text     = "No sources installed — go to Sources",
+            dim      = true,
+            callback = push_sources,
+        })
+        return { title = "Browse", items = items }
+    end
+
+    for _, meta in ipairs(installed) do
+        local m = meta
+        table.insert(items, {
+            text      = m.name,
+            mandatory = m.lang or "en",
+            bold      = true,
+            callback  = function()
+                local ctx = { source_id = m.id, page = 1, search = nil, novels = {} }
+                InkstreamUI.push(Browse.list_builder(ctx))
+                Browse.fetch_list(ctx, 1, nil)
+            end,
+        })
+    end
+
+    table.insert(items, {
+        text     = "Manage sources…",
+        bold     = true,
+        callback = push_sources,
+    })
+    return { title = "Browse", items = items }
+end
+
+-- Root screen: the source picker.
+function Browse.build_screen()
+    return Browse.build_picker_screen()
+end
+
+function Browse.fetch_list(ctx, page, search_term)
+    local ext = ExtMgr.get(ctx.source_id)
     if not ext then
         UIManager:show(InfoMessage:new{
-            text    = "Extension not loaded: " .. tostring(source_id),
+            text    = "Extension not loaded: " .. tostring(ctx.source_id),
             timeout = 3,
         })
         return
@@ -193,16 +189,12 @@ function Browse.fetchAndShow(source_id, page, search_term)
                 return
             end
 
-            Browse._state     = "list"
-            Browse._source_id = source_id
-            Browse._novels    = novels or {}
-            Browse._page      = page
-            Browse._search    = (search_term and search_term ~= "") and search_term or nil
-            rebuild()
+            ctx.novels = novels or {}
+            ctx.page   = page
+            ctx.search = (search_term and search_term ~= "") and search_term or nil
+            require("ui.main_widget").rebuild_current(true)
         end)
     end)
 end
-
-function Browse.close() end
 
 return Browse

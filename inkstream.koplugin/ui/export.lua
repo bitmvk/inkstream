@@ -1,19 +1,18 @@
--- Export dialog: choose mode, trigger EPUB build.
-local UIManager   = require("ui/uimanager")
-local InputDialog = require("ui/widget/inputdialog")
-local InfoMessage = require("ui/widget/infomessage")
-local NetworkMgr  = require("ui/network/manager")
-local DataStorage = require("datastorage")
-local logger      = require("logger")
-local Epub        = require("core.epub")
-local DB          = require("core.db")
-local P           = require("ui.panel")
+-- Export popup: choose mode, trigger EPUB build. A ButtonDialogTitle-style
+-- dialog with the chapter count / locked warning in the title and a marker on
+-- the selected choices; it reopens after each change so the labels stay
+-- current.
+local UIManager    = require("ui/uimanager")
+local InputDialog  = require("ui/widget/inputdialog")
+local InfoMessage  = require("ui/widget/infomessage")
+local ButtonDialog = require("ui/widget/buttondialog")
+local NetworkMgr   = require("ui/network/manager")
+local DataStorage  = require("datastorage")
+local logger       = require("logger")
+local Epub         = require("core.epub")
+local DB           = require("core.db")
 
 local Export = {}
-
-local function close_all()
-    if _G.inkstream_close_all then _G.inkstream_close_all() end
-end
 
 local function inkstream_base_dir()
     local home = G_reader_settings and G_reader_settings:readSetting("home_dir")
@@ -33,10 +32,10 @@ local MODES = {
     { id = "range",       label = "Selected Chapters Only",  desc = "Custom selection → single file"  },
 }
 
-local _ctx   = nil
-local _mode  = "all_in_one"
-local _n     = 50
-local _panel = nil
+local _ctx  = nil
+local _mode = "all_in_one"
+local _n    = 50
+local _dlg  = nil
 
 local function rebuild(ctx)
     Export.show(ctx)
@@ -45,7 +44,7 @@ end
 -- ── Run ───────────────────────────────────────────────────────────────────────
 
 function Export.run(ctx)
-    -- Close the export options panel → detail panel becomes visible
+    -- Close the export options dialog
     Export.close()
 
     local novel   = ctx.novel
@@ -129,134 +128,110 @@ end
 
 -- ── Show ──────────────────────────────────────────────────────────────────────
 
+local function choose_n(ctx)
+    local dlg
+    dlg = InputDialog:new{
+        title      = "Chapters per volume",
+        input_type = "number",
+        input_hint = tostring(_n),
+        buttons    = {{
+            {
+                text             = "OK",
+                is_enter_default = true,
+                callback         = function()
+                    local v = tonumber(dlg:getInputText())
+                    if v and v > 0 then _n = math.floor(v) end
+                    UIManager:close(dlg)
+                    rebuild(ctx)
+                end,
+            },
+            { text = "Cancel", callback = function() UIManager:close(dlg) end },
+        }},
+    }
+    UIManager:show(dlg)
+end
+
 function Export.show(ctx)
-    local InkstreamUI = require("ui.main_widget")
-    _ctx           = ctx
-    local ch_cnt   = #(ctx.chapters or {})
-    local Settings = require("settings")
-    local flat     = Settings:get("export_location_flat")
+    _ctx = ctx
 
-    local rows = {}
-
-    table.insert(rows, P.makeRow(
-        string.format("%d chapter%s selected", ch_cnt, ch_cnt == 1 and "" or "s"),
-        { dim = true, callback = function() end }
-    ))
-
+    local ch_cnt = #(ctx.chapters or {})
     local locked_cnt = 0
     for _, ch in ipairs(ctx.chapters or {}) do
         if ch.locked then locked_cnt = locked_cnt + 1 end
     end
+
+    local title = ch_cnt .. " chapter" .. (ch_cnt == 1 and "" or "s") .. " selected"
     if locked_cnt > 0 then
-        table.insert(rows, P.makeRow(
-            string.format("[!] %d locked chapter%s in selection",
-                locked_cnt, locked_cnt == 1 and "" or "s"),
-            { bold = true, callback = function() end }
-        ))
-        table.insert(rows, P.makeRow(
-            "Locked chapters have no accessible content and will export as blank pages.",
-            { dim = true, callback = function() end }
-        ))
+        title = title
+            .. "\n[!] " .. locked_cnt .. " locked chapter"
+            .. (locked_cnt == 1 and "" or "s") .. " in selection"
+            .. "\nLocked chapters have no accessible content and will export as blank pages."
     end
 
-    table.insert(rows, P.hairline())
+    local Settings = require("settings")
+    local flat     = Settings:get("export_location_flat")
 
-    -- Mode selection
+    local buttons = {}
+
+    -- Mode choices
     for _, m in ipairs(MODES) do
         local mid = m.id
-        table.insert(rows, P.makeRow(
-            (mid == _mode and "> " or "  ") .. m.label, {
-                mandatory = m.desc,
-                bold      = mid == _mode,
-                callback  = function() _mode = mid; rebuild(ctx) end,
-            }
-        ))
+        table.insert(buttons, {{
+            text     = (mid == _mode and "● " or "  ") .. m.label,
+            align    = "left",
+            callback = function() _mode = mid; rebuild(ctx) end,
+        }})
     end
 
-    -- N picker (only when every_n active)
+    -- Chapters per volume (only when every_n is active)
     if _mode == "every_n" then
-        table.insert(rows, P.makeRow(
-            string.format("Chapters per volume: %d  (tap to change)", _n), {
-                callback = function()
-                    local dlg
-                    dlg = InputDialog:new{
-                        title      = "Chapters per volume",
-                        input_type = "number",
-                        input_hint = tostring(_n),
-                        buttons    = {{
-                            {
-                                text             = "OK",
-                                is_enter_default = true,
-                                callback         = function()
-                                    local v = tonumber(dlg:getInputText())
-                                    if v and v > 0 then _n = math.floor(v) end
-                                    UIManager:close(dlg)
-                                    rebuild(ctx)
-                                end,
-                            },
-                            { text = "Cancel", callback = function() UIManager:close(dlg) end },
-                        }},
-                    }
-                    UIManager:show(dlg)
-                end,
-            }
-        ))
+        table.insert(buttons, {{
+            text     = "Chapters per volume: " .. _n,
+            align    = "left",
+            callback = function() choose_n(ctx) end,
+        }})
     end
 
-    table.insert(rows, P.hairline())
+    table.insert(buttons, {})
 
-    -- Location toggle
-    table.insert(rows, P.makeRow(
-        (not flat and "> " or "  ") .. "Home/Inkstream/Series/Book.epub", {
-            mandatory = "organised",
-            bold      = not flat,
-            callback  = function()
-                Settings:set("export_location_flat", false)
-                rebuild(ctx)
-            end,
-        }
-    ))
-    table.insert(rows, P.makeRow(
-        (flat and "> " or "  ") .. "Home/Series/Book.epub", {
-            mandatory = "flat",
-            bold      = flat == true,
-            callback  = function()
-                Settings:set("export_location_flat", true)
-                rebuild(ctx)
-            end,
-        }
-    ))
+    -- Location choices
+    table.insert(buttons, {{
+        text     = (not flat and "● " or "  ") .. "Home/Inkstream/Series/Book.epub",
+        align    = "left",
+        callback = function()
+            Settings:set("export_location_flat", false)
+            rebuild(ctx)
+        end,
+    }})
+    table.insert(buttons, {{
+        text     = (flat and "● " or "  ") .. "Home/Series/Book.epub",
+        align    = "left",
+        callback = function()
+            Settings:set("export_location_flat", true)
+            rebuild(ctx)
+        end,
+    }})
 
-    local out_dir = inkstream_base_dir() .. "/"
-        .. (ctx.novel.name or ctx.novel.title or "Novel"):gsub('[<>:"/\\|?*]', "_")
-    table.insert(rows, P.makeRow("Output: " .. out_dir, { dim = true, callback = function() end }))
-
-    table.insert(rows, P.hairline())
-    table.insert(rows, P.makeRow("Start Export", {
-        bold = true,
+    table.insert(buttons, {})
+    table.insert(buttons, {{
+        text     = "Start Export",
         callback = function() Export.run(ctx) end,
-    }))
-    table.insert(rows, P.makeRow("Cancel", {
+    }})
+    table.insert(buttons, {{
+        text     = "Cancel",
         callback = function() Export.close() end,
-    }))
+    }})
 
-    local function on_back()
-        Export.close()
-    end
-
-    -- Close old panel before showing the new one
-    if _panel then UIManager:close(_panel) end
-    _panel = P.showSubPanel("Export Options", rows, on_back, close_all)
-    InkstreamUI.setExport(_panel)
+    if _dlg then UIManager:close(_dlg) end
+    _dlg = ButtonDialog:new{ title = title, buttons = buttons }
+    UIManager:show(_dlg)
 end
 
 function Export.close()
-    if _panel then
-        UIManager:close(_panel)
-        _panel = nil
+    if _dlg then
+        UIManager:close(_dlg)
+        _dlg = nil
     end
-    local ok, InkstreamUI = pcall(require, "ui.main_widget")
-    if ok then InkstreamUI.clearExport() end
 end
 
 return Export

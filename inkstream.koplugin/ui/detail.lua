@@ -1,36 +1,30 @@
--- Novel detail: Details tab (cover, meta, synopsis, track) +
--- Chapters tab (select/deselect/export pinned, paginated chapter list with export markers).
-local UIManager   = require("ui/uimanager")
-local InfoMessage = require("ui/widget/infomessage")
-local ConfirmBox  = require("ui/widget/confirmbox")
-local NetworkMgr  = require("ui/network/manager")
-local ExtMgr      = require("core.extmgr")
-local DB          = require("core.db")
-local Live        = require("core.live")
-local LiveBook    = require("core.livebook")
-local P           = require("ui.panel")
-local Device      = require("device")
-local Screen      = Device.screen
+-- Novel screen: a single list with Read/Continue, Back to furthest, About,
+-- Track/Untrack, the mode and retry rows when applicable, "Chapter options…"
+-- (select/export/refresh) and every chapter (tap to read, long-press to
+-- toggle export selection). Live reading, mode switching and fetching below
+-- stay as before.
+local UIManager    = require("ui/uimanager")
+local InfoMessage  = require("ui/widget/infomessage")
+local ConfirmBox   = require("ui/widget/confirmbox")
+local TextViewer   = require("ui/widget/textviewer")
+local ImageViewer  = require("ui/widget/imageviewer")
+local ButtonDialog = require("ui/widget/buttondialog")
+local NetworkMgr   = require("ui/network/manager")
+local ExtMgr       = require("core.extmgr")
+local DB           = require("core.db")
+local Live         = require("core.live")
+local LiveBook     = require("core.livebook")
 
 local function get_export_ui() return require("ui.export") end
 
 local Detail = {}
-Detail.on_back = nil
 
 local _source_id    = nil
 local _novel_info   = nil
 local _all_chapters = {}
 local _selected     = {}
-local _page         = 1
-local _detail_tab   = "details"  -- "details" | "chapters"
-local _panel        = nil
 local _cover_bb     = nil
 local _fetch_id     = 0  -- cancels stale in-flight fetches
-
-local DETAIL_TABS = {
-    { id = "details",  label = "Details"  },
-    { id = "chapters", label = "Chapters" },
-}
 
 local function close_all()
     if _G.inkstream_close_all then _G.inkstream_close_all() end
@@ -65,56 +59,178 @@ local function selected_chapters()
     return out
 end
 
--- ── Details tab rows ──────────────────────────────────────────────────────────
+local function reset_state(source_id)
+    _source_id    = source_id
+    _selected     = {}
+    _all_chapters = {}
+    _novel_info   = nil
+    if _cover_bb then _cover_bb:free(); _cover_bb = nil end
+end
 
-local function build_details_rows(info)
-    local is_tracked = DB.find(_source_id, info.path or "") ~= nil
-    local rows = {}
+-- ── About / Cover ─────────────────────────────────────────────────────────────
 
-    -- Cover image (already aspect-ratio scaled at fetch time)
-    local cover_widget = P.makeImageRow(_cover_bb)
-    if cover_widget then table.insert(rows, cover_widget) end
+local function show_about(info)
+    local lines = {
+        info.name or info.title or "Novel",
+        "",
+        "Author: " .. (info.author or "Unknown"),
+        "Status: " .. (info.status or "?"),
+        "Chapters: " .. #_all_chapters,
+    }
+    if info.summary and info.summary ~= "" then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = info.summary
+    end
 
-    -- Metadata
+    -- Fold the separate Cover row into the About viewer as a "Cover" button.
+    local buttons_table
+    if _cover_bb then
+        buttons_table = {
+            {
+                { text = "Cover", callback = function() show_cover(info) end },
+            },
+        }
+    end
+
+    UIManager:show(TextViewer:new{
+        title         = info.name or info.title or "Novel",
+        text          = table.concat(lines, "\n"),
+        buttons_table = buttons_table,
+    })
+end
+
+local function show_cover(info)
+    if not _cover_bb then return end
+    UIManager:show(ImageViewer:new{
+        image            = _cover_bb,
+        image_disposable = false,  -- Detail frees _cover_bb itself
+        title_text       = info.name or info.title or "Novel",
+        with_title_bar   = true,
+    })
+end
+
+-- ── Chapter options dialog ────────────────────────────────────────────────────
+
+local function show_chapter_options(info)
+    local ext       = ExtMgr.get(_source_id)
+    local sel_count = count_selected()
+    local buttons   = {}
+    local dlg
+
+    table.insert(buttons, {{
+        text     = "Select all (" .. #_all_chapters .. ")",
+        callback = function()
+            UIManager:close(dlg)
+            select_all()
+            Detail.rebuild(info, true)
+        end,
+    }})
+    table.insert(buttons, {{
+        text     = "Deselect all",
+        callback = function()
+            UIManager:close(dlg)
+            deselect_all()
+            Detail.rebuild(info, true)
+        end,
+    }})
+    if sel_count > 0 then
+        table.insert(buttons, {{
+            text     = "Export (" .. sel_count .. " chapters)",
+            callback = function()
+                UIManager:close(dlg)
+                if not ext then return end
+                get_export_ui().show({
+                    chapters       = selected_chapters(),
+                    novel          = info,
+                    source_id      = _source_id,
+                    total_chapters = #_all_chapters,
+                    fetch_fn       = function(path)
+                        local ok, html = pcall(ext.parseChapter, ext, path)
+                        return ok and html or nil
+                    end,
+                })
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text     = "Refresh chapter list",
+        callback = function()
+            UIManager:close(dlg)
+            Detail.fetchForceRefresh(_source_id, info.path or "")
+        end,
+    }})
+    table.insert(buttons, {{
+        text     = "Close",
+        callback = function() UIManager:close(dlg) end,
+    }})
+
+    dlg = ButtonDialog:new{ title = "Chapter options", buttons = buttons }
+    UIManager:show(dlg)
+end
+
+-- ── Screen builder ────────────────────────────────────────────────────────────
+
+function Detail.build_screen()
+    local info = _novel_info
+    if not info then
+        return { title = "Novel", items = { { text = "Loading…", dim = true } } }
+    end
+
+    local live_state   = LiveBook.state_for(_source_id, info.path or "")
+    local is_tracked   = DB.find(_source_id, info.path or "") ~= nil
+    local exported_set = DB.getExportedChapterSet(_source_id, info.path or "")
+
+    local items = {}
+
+    -- Read / Continue reading
+    table.insert(items, {
+        text     = live_state and live_state.cur
+            and ("Continue reading (Ch. " .. live_state.cur .. ")")
+            or "Read",
+        bold     = true,
+        callback = function() Detail.start_live_reading(info, nil) end,
+    })
+
+    -- Reading back through older chapters: offer a quick return.
+    if live_state and live_state.furthest and live_state.cur
+       and live_state.furthest > live_state.cur then
+        table.insert(items, {
+            text     = "Back to furthest (Ch. " .. live_state.furthest .. ")",
+            bold     = true,
+            callback = function()
+                Detail.start_live_reading(info, live_state.furthest)
+            end,
+        })
+    end
+
+    -- About (metadata + synopsis in a TextViewer; the cover is folded into
+    -- that viewer as a "Cover" button when a cover was fetched).
     local meta_str = (info.author or "Unknown")
         .. "  ·  " .. (info.status or "?")
         .. "  ·  " .. #_all_chapters .. " ch"
-    table.insert(rows, P.makeRow(meta_str, { dim = true, callback = function() end }))
+    table.insert(items, {
+        text     = "About — " .. meta_str,
+        callback = function() show_about(info) end,
+    })
 
-    -- Synopsis
-    if info.summary and info.summary ~= "" then
-        table.insert(rows, P.makeTextBlock(info.summary, 500))
-    end
+    -- Track / Untrack.
+    table.insert(items, {
+        text     = is_tracked and "Untrack novel" or "Track novel",
+        bold     = true,
+        callback = function()
+            if is_tracked then
+                DB.untrack(_source_id, info.path or "")
+                Detail.rebuild(info, true)
+            elseif LiveBook.state_for(_source_id, info.path or "") then
+                DB.track(Detail.track_fields(info))
+                Detail.rebuild(info, true)
+            else
+                Detail.choose_and_start(info, nil, false)
+            end
+        end,
+    })
 
-    table.insert(rows, P.hairline())
-
-    -- Read / Continue reading: opens (or reopens) the live EPUB
-    local live_state = LiveBook.state_for(_source_id, info.path or "")
-    table.insert(rows, P.makeRow(
-        live_state and live_state.cur
-            and ("Continue reading (Ch. " .. live_state.cur .. ")")
-            or "Read", {
-            bold     = true,
-            callback = function()
-                Detail.start_live_reading(info, nil)
-            end,
-        }
-    ))
-
-    -- Reading back through older chapters: offer a quick return.
-    if live_state and live_state.furthest
-       and live_state.cur and live_state.furthest > live_state.cur then
-        table.insert(rows, P.makeRow(
-            "Back to furthest (Ch. " .. live_state.furthest .. ")", {
-                bold     = true,
-                callback = function()
-                    Detail.start_live_reading(info, live_state.furthest)
-                end,
-            }
-        ))
-    end
-
-    -- Live mode + switching (only when a live state exists).
+    -- Mode row (when a live state exists) + Retry failed chapters.
     if live_state then
         local mode_label
         if live_state.mode == "full" then
@@ -127,116 +243,33 @@ local function build_details_rows(info)
         else
             mode_label = "Mode: Window"
         end
-        table.insert(rows, P.makeRow(mode_label, {
-            dim      = true,
-            callback = function()
-                Detail.switch_mode(info, live_state)
-            end,
-        }))
+        table.insert(items, {
+            text     = mode_label,
+            bold     = true,
+            callback = function() Detail.switch_mode(info, live_state) end,
+        })
 
-        -- Retry chapters that failed permanently at the source.
         if live_state.mode == "full" and LiveBook.failed_count(live_state) > 0 then
-            table.insert(rows, P.makeRow("Retry failed chapters", {
+            table.insert(items, {
+                text     = "Retry failed chapters",
                 bold     = true,
-                callback = function()
-                    Detail.retry_failed(info, live_state)
-                end,
-            }))
+                callback = function() Detail.retry_failed(info, live_state) end,
+            })
         end
     end
 
-    -- Track / Untrack (untracking does not delete live books).
-    table.insert(rows, P.makeRow(
-        is_tracked and "Untrack Novel" or "Track Novel", {
-            bold = true,
-            callback = function()
-                if is_tracked then
-                    DB.untrack(_source_id, info.path or "")
-                    Detail.rebuild(info, true)
-                elseif LiveBook.state_for(_source_id, info.path or "") then
-                    -- Live book already exists: tracking stays plain.
-                    DB.track(Detail.track_fields(info))
-                    Detail.rebuild(info, true)
-                else
-                    -- No live book yet: tracking also starts it (with the
-                    -- book_mode choice when set to "ask").
-                    Detail.choose_and_start(info, nil, false)
-                end
-            end,
-        }
-    ))
+    -- Chapter options (select / export / refresh).
+    table.insert(items, {
+        text     = "Chapter options…",
+        bold     = true,
+        callback = function() show_chapter_options(info) end,
+    })
 
-    table.insert(rows, P.makeRow("Refresh Chapter List", {
-        dim      = true,
-        callback = function()
-            Detail.fetchForceRefresh(_source_id, info.path or "")
-        end,
-    }))
-
-    return rows
-end
-
--- ── Chapters tab rows ─────────────────────────────────────────────────────────
--- Returns rows, nav where nav is the pagination nav bar descriptor (or nil).
-
-local function build_chapters_rows(info)
-    local sel_count    = count_selected()
-    local exported_set = DB.getExportedChapterSet(_source_id, info.path or "")
-    local rows         = {}
-
-    -- ── Pinned action header (always at top, not paginated) ──
-
-    table.insert(rows, P.makeRow("Select All (" .. #_all_chapters .. ")", {
-        bold = true,
-        callback = function() select_all(); Detail.rebuild(info, true) end,
-    }))
-    table.insert(rows, P.makeRow("Deselect All", {
-        callback = function() deselect_all(); Detail.rebuild(info, true) end,
-    }))
-
-    local ext = ExtMgr.get(_source_id)
-    local export_label = sel_count > 0
-        and ("Export (" .. sel_count .. " chapters)")
-        or  "Export — long-press chapters to select"
-    table.insert(rows, P.makeRow(export_label, {
-        bold = sel_count > 0,
-        dim  = sel_count == 0,
-        callback = function()
-            if sel_count == 0 or not ext then return end
-            get_export_ui().show({
-                chapters       = selected_chapters(),
-                novel          = info,
-                source_id      = _source_id,
-                total_chapters = #_all_chapters,
-                fetch_fn       = function(path)
-                    local ok, html = pcall(ext.parseChapter, ext, path)
-                    return ok and html or nil
-                end,
-            })
-        end,
-    }))
-    table.insert(rows, P.hairline())
-
-    -- ── Paginated chapter list ──
-
-    -- Fixed content height consumed by the 3 action rows + hairline
-    local fixed_h       = 3 * P.ROW_H + P.HAIRLINE
-    local total_ch      = #_all_chapters
-    -- Compute per_page using full height first; if all chapters fit, no nav bar needed
-    local per_page_full = math.max(1, math.floor((P.CONTENT_H     - fixed_h) / P.ROW_H))
-    local per_page_nav  = math.max(1, math.floor((P.CONTENT_H_NAV - fixed_h) / P.ROW_H))
-    local use_nav       = math.ceil(total_ch / per_page_full) > 1
-    local per_page      = use_nav and per_page_nav or per_page_full
-    local max_pages     = math.max(1, math.ceil(total_ch / per_page))
-    if _page > max_pages then _page = max_pages end
-
-    if total_ch == 0 then
-        table.insert(rows, P.makeRow("No chapters found", { dim = true, callback = function() end }))
+    -- Chapters.
+    if #_all_chapters == 0 then
+        table.insert(items, { text = "No chapters found", dim = true })
     else
-        local ch_start = (_page - 1) * per_page + 1
-        local ch_end   = math.min(ch_start + per_page - 1, total_ch)
-        for i = ch_start, ch_end do
-            local ch        = _all_chapters[i]
+        for i, ch in ipairs(_all_chapters) do
             local p         = ch_path(ch, i)
             local label     = ch.name or ch.title or ("Chapter " .. i)
             local inf       = info
@@ -247,12 +280,13 @@ local function build_chapters_rows(info)
             local display   = is_locked
                 and (prefix .. " (locked) " .. label)
                 or  (prefix .. (is_sel and " [x] " or " [ ] ") .. label)
-            table.insert(rows, P.makeRow(display, {
+            table.insert(items, {
+                text      = display,
                 mandatory = ch.chapter_number and ("Ch." .. ch.chapter_number) or nil,
                 bold      = is_sel and not is_locked,
                 dim       = is_locked,
-                callback  = is_locked and function() end or function()
-                    -- Tap: read this novel live, centred on this chapter
+                -- Tap: read this novel live, centred on this chapter.
+                callback  = is_locked and nil or function()
                     UIManager:show(ConfirmBox:new{
                         text = "Read from here (Ch. "
                             .. tostring(ch.chapter_number or i) .. ")?",
@@ -262,77 +296,34 @@ local function build_chapters_rows(info)
                         end,
                     })
                 end,
+                -- Long-press: toggle the chapter's export selection.
                 hold_callback = is_locked and nil or function()
-                    -- Long-press: toggle the chapter's export selection
                     if _selected[p] then _selected[p] = nil
                     else _selected[p] = true end
                     Detail.rebuild(inf, true)
                 end,
-            }))
+            })
         end
     end
 
-    -- Nav bar descriptor (nil when all chapters fit on one page)
-    local nav = use_nav and {
-        page      = _page,
-        max_pages = max_pages,
-        on_prev   = _page > 1 and function()
-            _page = _page - 1; Detail.rebuild(info, true)
-        end or nil,
-        on_next   = _page < max_pages and function()
-            _page = _page + 1; Detail.rebuild(info, true)
-        end or nil,
-        on_first  = _page > 1 and function()
-            _page = 1; Detail.rebuild(info, true)
-        end or nil,
-        on_last   = _page < max_pages and function()
-            _page = max_pages; Detail.rebuild(info, true)
-        end or nil,
-        on_jump   = function(n)
-            _page = math.max(1, math.min(max_pages, math.floor(n)))
-            Detail.rebuild(info, true)
-        end,
-    } or nil
-
-    return rows, nav
+    return { title = info.name or info.title or "Novel", items = items }
 end
 
--- ── Rebuild ───────────────────────────────────────────────────────────────────
--- partial = true uses partial e-ink refresh (chapter ticks, pagination changes).
+-- ── Rebuild / open ────────────────────────────────────────────────────────────
 
+-- Rebuild the novel screen in place (partial is kept for API compatibility;
+-- the Menu handles the repaint).
 function Detail.rebuild(info, partial)
-    local InkstreamUI = require("ui.main_widget")
-    local title    = info.name or info.title or "Novel"
-
-    local rows, nav
-    if _detail_tab == "chapters" then
-        rows, nav = build_chapters_rows(info)
-    else
-        rows = build_details_rows(info)
-    end
-
-    -- Closure captures module-level _novel_info so tab switches always use fresh data
-    local function switch_tab(id)
-        _detail_tab = id
-        _page = 1
-        Detail.rebuild(_novel_info)  -- full refresh on tab switch
-    end
-
-    local function on_back()
-        Detail.close()
-        InkstreamUI.clearDetail()
-        if Detail.on_back then Detail.on_back() end
-    end
-
-    -- Let InkstreamUI.setDetail close the previous panel
-    _panel = P.showCustomTabPanel(
-        DETAIL_TABS, _detail_tab, switch_tab,
-        rows, title, on_back, close_all, nav, partial
-    )
-    InkstreamUI.setDetail(_panel)
+    require("ui.main_widget").rebuild_current()
 end
 
--- ── Public ────────────────────────────────────────────────────────────────────
+-- Open a novel: reset the screen state, push its screen, then fetch.
+function Detail.open(source_id, path)
+    reset_state(source_id)
+    require("ui.main_widget").push(function() return Detail.build_screen() end)
+    Detail.fetch(source_id, path)
+end
+
 
 -- Clear chapter cache then re-fetch from scratch.
 function Detail.fetchForceRefresh(source_id, path)
@@ -816,15 +807,9 @@ function Detail.retry_failed(info, state)
 end
 
 function Detail.fetch(source_id, path)
-    _fetch_id     = _fetch_id + 1
-    local my_id   = _fetch_id
-    _source_id    = source_id
-    _selected     = {}
-    _all_chapters = {}
-    _novel_info   = nil
-    _page         = 1
-    _detail_tab   = "details"
-    if _cover_bb then _cover_bb:free(); _cover_bb = nil end
+    _fetch_id   = _fetch_id + 1
+    local my_id = _fetch_id
+    reset_state(source_id)
 
     local ext = ExtMgr.get(source_id)
     if not ext then
@@ -940,14 +925,10 @@ function Detail.fetch(source_id, path)
                         if ok_bb and native then
                             local nw, nh = native:getWidth(), native:getHeight()
                             if nw > 0 and nh > 0 then
-                                local max_w = P.W - 2 * P.MARGIN
-                                local max_h = Screen:scaleBySize(180)
-                                local scale = math.min(max_w / nw, max_h / nh)
-                                local dw = math.max(1, math.floor(nw * scale))
-                                local dh = math.max(1, math.floor(nh * scale))
-                                _cover_bb = native:scale(dw, dh)
+                                _cover_bb = native  -- ImageViewer scales to fit
+                            else
+                                native:free()
                             end
-                            native:free()
                         end
                     end
                 end
@@ -966,11 +947,7 @@ function Detail.fetch(source_id, path)
     end)
 end
 
-function Detail.close()
-    if _panel then
-        UIManager:close(_panel)
-        _panel = nil
-    end
+function Detail.free_cover()
     if _cover_bb then
         _cover_bb:free()
         _cover_bb = nil

@@ -1,5 +1,5 @@
 -- Inkstream — main plugin entry point.
-_G.INKSTREAM_VERSION = "0.1.1"
+_G.INKSTREAM_VERSION = "0.1.2"
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager       = require("ui/uimanager")
@@ -42,29 +42,22 @@ local function open_inkstream()
         local Library  = require("ui.library")
         local Browse   = require("ui.browse")
         local Detail   = require("ui.detail")
-        local Sources  = require("ui.sources")
         local ExtMgr   = require("core.extmgr")
 
         if not _ready then
             ExtMgr.ensure_init()
 
-            -- Wire tab row builders
-            InkstreamUI.get_library_rows = function() return Library.build_rows() end
-            InkstreamUI.get_browse_rows  = function() return Browse.build_rows()  end
-            InkstreamUI.get_sources_rows = function() return Sources.build_rows() end
+            -- Wire the root screen builders (the Sources screen is pushed from
+            -- Browse, so it has no root).
+            InkstreamUI.set_root_builder("library", function() return Library.build_screen() end)
+            InkstreamUI.set_root_builder("browse",  function() return Browse.build_screen()  end)
 
-            -- Library: tapping a novel opens Detail above the library panel
+            -- Tapping a novel (library or browse) pushes the novel screen and fetches it.
             Library.on_novel_tap = function(novel)
-                InkstreamUI.active_tab = "library"
-                Detail.on_back = nil  -- tab panel stays alive; closing detail reveals it
-                Detail.fetch(novel.source_id, novel.path)
+                Detail.open(novel.source_id, novel.path)
             end
-
-            -- Browse: tapping a novel opens Detail above the browse panel
             Browse.on_novel_tap = function(source_id, novel_meta)
-                InkstreamUI.active_tab = "browse"
-                Detail.on_back = nil
-                Detail.fetch(source_id, novel_meta.path or novel_meta.sourceUrl or "")
+                Detail.open(source_id, novel_meta.path or novel_meta.sourceUrl or "")
             end
 
             _ready = true
