@@ -1,7 +1,8 @@
 -- core/updater.lua — Inkstream OTA updater
 -- Checks GitHub releases API, downloads inkstream.koplugin.zip, unzips in-place,
 -- deletes the zip, then offers a KOReader restart. autoCheck() runs silently
--- when Inkstream opens and only speaks up when a newer release exists.
+-- when Inkstream opens and only speaks up when a newer release exists;
+-- checkNow() is the manual check from Settings.
 
 local UIManager   = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
@@ -300,22 +301,21 @@ local function offer_extension_updates(list)
     })
 end
 
--- Silent check, run when Inkstream opens: at most once per KOReader session,
--- only when online (open_inkstream turns Wi-Fi on first), the requests run in
--- a subprocess so a slow network cannot freeze the UI. Checks Inkstream itself
--- and the installed source extensions; shows nothing unless something newer
--- exists.
-local _auto_checked = false
-function Updater.autoCheck()
-    if _auto_checked then return end
-    if not require("ui/network/manager"):isConnected() then return end
-    _auto_checked = true
+-- Runs the update check in a subprocess (so a slow network cannot freeze the
+-- UI): Inkstream's latest GitHub release plus the installed source extensions.
+-- on_done(data) gets nil on failure, else { found, version, download_url,
+-- notes, extensions } where found = the GitHub release was read.
+local _checking = false
+local function run_check(on_done)
+    if _checking then return end
+    _checking = true
     local BgTask = require("core.bgtask")
     BgTask.start("update-check", BgTask.child(function()
         local result = { ok = true }
         local body = http_get(API_URL)
         local release = body and parse_release(body)
         if release then
+            result.found        = true
             result.version      = release.version
             result.download_url = release.download_url
             result.notes        = release.notes
@@ -324,16 +324,57 @@ function Updater.autoCheck()
         result.extensions = ok_ext and ext_updates or {}
         return result
     end), function(data)
-        if not (data and data.ok) then return end
-        if data.extensions and #data.extensions > 0 then
-            offer_extension_updates(data.extensions)
-        end
-        local current = current_version()
-        if data.download_url and version_gt(data.version, current) then
-            offer_update(data, current)
-        else
-            logger.dbg("Inkstream/Updater: auto check, Inkstream up to date", current)
-        end
+        _checking = false
+        on_done(data and data.ok and data or nil)
+    end)
+end
+
+-- Offers whatever the check found. Returns true if anything was offered.
+local function offer_found(data)
+    local offered = false
+    if data.extensions and #data.extensions > 0 then
+        offer_extension_updates(data.extensions)
+        offered = true
+    end
+    local current = current_version()
+    if data.download_url and version_gt(data.version, current) then
+        offer_update(data, current)
+        offered = true
+    end
+    return offered
+end
+
+-- Silent check, run when Inkstream opens and online (open_inkstream turns
+-- Wi-Fi on first). Shows nothing unless something newer exists. Once a check
+-- reaches GitHub it is not repeated this KOReader session; a failed check is
+-- retried the next time Inkstream opens.
+local _auto_checked = false
+function Updater.autoCheck()
+    if _auto_checked then return end
+    if not require("ui/network/manager"):isConnected() then return end
+    run_check(function(data)
+        if not data then return end
+        if data.found then _auto_checked = true end
+        offer_found(data)
+    end)
+end
+
+-- Manual check from Settings: always says what it found.
+function Updater.checkNow()
+    require("ui/network/manager"):runWhenOnline(function()
+        local msg = InfoMessage:new{ text = "Checking for updates…" }
+        UIManager:show(msg)
+        run_check(function(data)
+            UIManager:close(msg)
+            if data and data.found then _auto_checked = true end
+            if data and offer_found(data) then return end
+            UIManager:show(InfoMessage:new{
+                text = (data and data.found)
+                    and ("Inkstream " .. current_version() .. " is up to date.")
+                    or  "Could not reach GitHub. Try again later.",
+                timeout = 3,
+            })
+        end)
     end)
 end
 

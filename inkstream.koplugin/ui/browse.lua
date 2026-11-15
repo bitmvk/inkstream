@@ -3,13 +3,16 @@
 -- term, results), so back navigation rebuilds the right screen. The source
 -- API is paged without a known total, so site pages are list rows: a bold
 -- "Search…" row, a "← Previous page" row when page > 1, then the novels, and
--- a "Next page" row last. The root picker lists installed sources and ends
--- with a "Manage sources…" row that pushes the Sources screen.
+-- a "Next page" row last. Novel rows show a cover thumbnail on the left when
+-- covers_browse is on. The root picker starts with a "Search all sources…"
+-- row (ui/search.lua) and ends with a "Manage sources…" row.
 local UIManager   = require("ui/uimanager")
 local InputDialog = require("ui/widget/inputdialog")
 local InfoMessage = require("ui/widget/infomessage")
 local NetworkMgr  = require("ui/network/manager")
 local ExtMgr      = require("core.extmgr")
+local Settings    = require("settings")
+local Covers      = require("core.covers")
 
 local Browse = {}
 Browse.on_novel_tap = nil
@@ -80,15 +83,25 @@ function Browse.build_list_screen(ctx)
     if #novels == 0 then
         table.insert(items, { text = "No results", dim = true })
     else
+        local cover_urls = {}
         for _, novel in ipairs(novels) do
             local n = novel
-            table.insert(items, {
-                text      = require("ui.main_widget").two_lines(n.name or n.title or "?", n.author),
+            local entry = {
+                text      = n.name or n.title or "?",
+                subtitle  = n.author,
                 callback  = function()
                     if Browse.on_novel_tap then Browse.on_novel_tap(source_id, n) end
                 end,
-            })
+            }
+            if Settings:get("covers_browse") and n.cover and n.cover ~= "" then
+                entry.cover_url = n.cover
+                cover_urls[#cover_urls + 1] = n.cover
+            end
+            table.insert(items, entry)
         end
+        Covers.request(cover_urls, function()
+            require("ui.main_widget").rebuild_current()
+        end)
     end
 
     table.insert(items, {
@@ -111,6 +124,13 @@ function Browse.build_picker_screen()
     local InkstreamUI = require("ui.main_widget")
     local installed   = ExtMgr.installed()
     local items       = {}
+
+    -- First row: search every installed source at once.
+    table.insert(items, {
+        text     = "Search all sources…",
+        bold     = true,
+        callback = function() require("ui.search").open() end,
+    })
 
     if #installed == 0 then
         table.insert(items, {

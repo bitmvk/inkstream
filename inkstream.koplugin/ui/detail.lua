@@ -69,6 +69,8 @@ end
 
 -- ── About / Cover ─────────────────────────────────────────────────────────────
 
+local show_cover  -- defined below; the About viewer's Cover button calls it
+
 local function show_about(info)
     local lines = {
         info.name or info.title or "Novel",
@@ -99,7 +101,7 @@ local function show_about(info)
     })
 end
 
-local function show_cover(info)
+show_cover = function(info)
     if not _cover_bb then return end
     UIManager:show(ImageViewer:new{
         image            = _cover_bb,

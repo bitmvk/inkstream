@@ -1,10 +1,18 @@
 -- Inkstream UI shell. A full-screen container (covers_fullscreen, white
--- background) holds a VerticalGroup of the screen Menu and a persistent
--- Library|Browse tab bar. Screens are a stack of builders that each return
--- { title, subtitle?, items }. The title-bar left icon is a settings gear on
--- root screens and a back chevron on pushed screens; the right ✕ closes
--- Inkstream; the footer back arrow and the device Back key pop the stack
--- (closing Inkstream at the root).
+-- background) holds the screen and a persistent Library|Browse tab bar.
+--
+-- Screens are a stack of builders. A builder returns either a Menu screen
+--   { title, subtitle?, items, items_per_page? }
+-- or a custom-body screen
+--   { title, subtitle?, body = function(w, h) return widget end }
+-- For a custom body the shell shows a KOReader TitleBar (FileManager style:
+-- back chevron on the left, ✕ on the right), then the body, then the tab bar,
+-- in place of the Menu. Back, the device Back key, the tabs and
+-- rebuild_current work for both kinds.
+--
+-- On root screens the title-bar left icon is a settings gear; on pushed
+-- screens it is a back chevron. The footer back arrow and the device Back key
+-- pop the stack (closing Inkstream at the root).
 local Blitbuffer     = require("ffi/blitbuffer")
 local Device         = require("device")
 local Font           = require("ui/font")
@@ -16,10 +24,18 @@ local Size           = require("ui/size")
 local TextWidget     = require("ui/widget/textwidget")
 local UIManager      = require("ui/uimanager")
 local CenterContainer = require("ui/widget/container/centercontainer")
+local FrameContainer  = require("ui/widget/container/framecontainer")
+local HorizontalSpan  = require("ui/widget/horizontalspan")
+local LeftContainer   = require("ui/widget/container/leftcontainer")
+local RightContainer  = require("ui/widget/container/rightcontainer")
+local OverlapGroup    = require("ui/widget/overlapgroup")
+local UnderlineContainer = require("ui/widget/container/underlinecontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local InputContainer  = require("ui/widget/container/inputcontainer")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local TitleBar        = require("ui/widget/titlebar")
+local Covers          = require("core.covers")
 
 local Screen = Device.screen
 
@@ -29,6 +45,8 @@ local _root_builders = {}       -- root name -> builder function
 local _menu           = nil     -- the single Menu instance (nil when closed)
 local _tab_bar        = nil
 local _container      = nil     -- the top-level widget UIManager shows/closes
+local _title_bar      = nil     -- TitleBar shown for a custom-body screen
+local _body           = nil     -- the custom-body widget (nil for Menu screens)
 
 local TAB_BAR_HEIGHT = Screen:scaleBySize(56)
 
@@ -40,7 +58,7 @@ end
 -- ── Full-screen container ─────────────────────────────────────────────────────
 -- What UIManager:show / UIManager:close act on. It paints a white background
 -- and forwards events (tap, hold, swipe, keys) to its child VerticalGroup, so
--- both the Menu and the tab bar stay interactive.
+-- both the Menu (or body) and the tab bar stay interactive.
 
 local InkstreamContainer = WidgetContainer:extend{
     covers_fullscreen = true,
@@ -157,17 +175,6 @@ function InkstreamMenu:current_builder()
     return self.paths[#self.paths] or self.root_builder
 end
 
--- Build and show a screen. itemnumber >= 1 keeps the current page; nil resets.
-function InkstreamMenu:render_screen(itemnumber)
-    local builder = self:current_builder()
-    local screen  = builder and builder() or { title = "Inkstream", items = {} }
-    self.current_screen = screen
-    -- Screens with two-line rows ask for fewer, taller rows; nil = default.
-    self.items_per_page = screen.items_per_page
-    self:switchItemTable(screen.title or "Inkstream",
-        screen.items or {}, itemnumber, nil, screen.subtitle or "")
-end
-
 -- Left title-bar icon follows the stack depth: a settings gear on roots, a
 -- back chevron on pushed screens.
 function InkstreamMenu:update_left_icon()
@@ -191,7 +198,95 @@ function InkstreamMenu:init()
             self.key_events.Back = { { "Left" } }
         end
     end
-    self:render_screen(nil)
+end
+
+-- Visual for a row whose entry has a `subtitle` (e.g. novel title + author):
+-- title in the item font, subtitle below it smaller and grey, `mandatory` on
+-- the right. When the entry carries `cover_url` / `cover_data` a cover
+-- thumbnail is drawn on the left. Mirrors MenuItem's own layout (padding,
+-- underline).
+local function thumb_size(item_h)
+    local h = math.floor(item_h * 0.78)
+    return math.floor(h * 2 / 3), h
+end
+
+local function two_line_row(item)
+    local entry  = item.entry
+    local w, h   = item.content_width, item.dimen.h
+    local dim    = entry.dim and Blitbuffer.COLOR_DARK_GRAY or nil
+    local mandatory, mand_w = nil, 0
+    if entry.mandatory then
+        mandatory = TextWidget:new{ text = tostring(entry.mandatory), face = item.info_face, fgcolor = dim }
+        mand_w = mandatory:getWidth() + Size.span.horizontal_default
+    end
+    local cover, cover_w = nil, 0
+    if entry.cover_url or entry.cover_data then
+        local tw, th = thumb_size(h)
+        cover = Covers.thumb_widget(entry.cover_url, tw, th)
+            or Covers.thumb_widget_from_data(entry.cover_data, tw, th)
+            or Covers.placeholder(tw, th)
+        cover_w = tw + Size.span.horizontal_default
+    end
+    local text_w = w - cover_w - mand_w
+    local lines = VerticalGroup:new{
+        align = "left",
+        TextWidget:new{ text = entry.text, face = item.face, bold = item.bold,
+            max_width = text_w, fgcolor = dim },
+    }
+    if entry.subtitle and entry.subtitle ~= "" then
+        table.insert(lines, TextWidget:new{
+            text     = entry.subtitle,
+            face     = Font:getFace("cfont", item.infont_size),  -- item font, smaller
+            max_width = text_w,
+            fgcolor  = Blitbuffer.COLOR_DARK_GRAY,
+        })
+    end
+    local box = Geom:new{ w = w, h = h }
+    local content = HorizontalGroup:new{ align = "center" }
+    if cover then
+        table.insert(content, cover)
+        table.insert(content, HorizontalSpan:new{ width = Size.span.horizontal_default })
+    end
+    table.insert(content, lines)
+    local overlap = OverlapGroup:new{
+        dimen = box:copy(),
+        LeftContainer:new{ dimen = box:copy(), content },
+    }
+    if mandatory then
+        table.insert(overlap, RightContainer:new{ dimen = box:copy(), mandatory })
+    end
+    return FrameContainer:new{
+        bordersize = 0, padding = 0,
+        HorizontalGroup:new{
+            align = "center",
+            HorizontalSpan:new{ width = item.items_padding or Size.padding.fullscreen },
+            UnderlineContainer:new{
+                color = item.line_color, linesize = item.linesize,
+                vertical_align = "center", padding = 0,
+                dimen = Geom:new{ x = 0, y = 0, w = w, h = h },
+                overlap,
+            },
+            HorizontalSpan:new{ width = Size.padding.fullscreen },
+        },
+    }
+end
+
+-- Menu's MenuItem can't style two lines differently, so after the stock
+-- layout we redraw rows that carry a subtitle (or a cover). Taps and holds
+-- are still handled by the MenuItem itself. If MenuItem ever lacks the fields
+-- used here, the row keeps its stock look (title only).
+function InkstreamMenu:updateItems(...)
+    -- The old rows are about to be cleared, so release their cover BlitBuffers
+    -- first (page turns and rebuilds both come through here).
+    Covers.free_all()
+    Menu.updateItems(self, ...)
+    for _, item in ipairs(self.item_group) do
+        local e = item.entry
+        if e and (e.subtitle or e.cover_url or e.cover_data)
+                and item.face and item.info_face and item.infont_size and item.content_width then
+            item[1] = two_line_row(item)
+        end
+    end
 end
 
 -- Tap = run the item's callback. (The base also fires close_callback, which
@@ -210,14 +305,7 @@ end
 -- Footer back arrow / device Back key: pop and rebuild the previous screen
 -- from its builder (fresh data), closing Inkstream at the root.
 function InkstreamMenu:onReturn()
-    if #self.paths > 0 then
-        table.remove(self.paths)
-        self:render_screen(nil)
-        self:update_left_icon()
-    else
-        InkstreamUI.close()
-    end
-    return true
+    return InkstreamUI.on_return()
 end
 
 function InkstreamMenu:onBack()
@@ -241,10 +329,106 @@ function InkstreamMenu:onClose()
     return true
 end
 
--- ── Controller API ────────────────────────────────────────────────────────────
+-- ── Custom-body screen ────────────────────────────────────────────────────────
+-- Wraps a body widget and handles the device Back key (the TitleBar's back
+-- chevron and ✕ are wired separately in render_body).
+
+local BodyScreen = InputContainer:extend{
+    on_back = nil,
+}
+
+function BodyScreen:init()
+    if Device:hasKeys() then
+        self.key_events.Back = { { Device.input.group.Back } }
+        if Device:hasFewKeys() then
+            self.key_events.Back = { { "Left" } }
+        end
+    end
+end
+
+function BodyScreen:onBack()
+    if self.on_back then self.on_back() end
+    return true
+end
+
+-- ── Controller ────────────────────────────────────────────────────────────────
+
+local function current_builder()
+    return _menu.paths[#_menu.paths] or _menu.root_builder
+end
+
+local function render_menu(screen, itemnumber)
+    -- Swap the container back to the Menu (never clear(): WidgetContainer:clear
+    -- would free the long-lived _menu/_tab_bar instances).
+    _title_bar = nil
+    _body      = nil
+    _container[1] = VerticalGroup:new{ _menu, _tab_bar }
+    -- Screens with subtitle rows ask for fewer, taller rows; nil = default.
+    _menu.items_per_page = screen.items_per_page
+    _menu:switchItemTable(screen.title or "Inkstream",
+        screen.items or {}, itemnumber, nil, screen.subtitle or "")
+end
+
+local function render_body(screen)
+    -- Build the title bar first so its height is known for the body area.
+    _title_bar = TitleBar:new{
+        width              = Screen:getWidth(),
+        fullscreen         = "true",
+        align              = "center",
+        title              = screen.title or "Inkstream",
+        subtitle           = screen.subtitle or "",
+        title_top_padding  = Screen:scaleBySize(6),
+        button_padding     = Screen:scaleBySize(5),
+        left_icon          = "chevron.left",
+        left_icon_size_ratio  = 1,
+        right_icon_size_ratio = 1,
+        left_icon_tap_callback = function() InkstreamUI.on_return() end,
+        close_callback = function() InkstreamUI.close() end,
+        show_parent = _container,
+    }
+    local body_h = Screen:getHeight() - TAB_BAR_HEIGHT - _title_bar:getHeight()
+    local body   = screen.body(Screen:getWidth(), body_h)
+
+    _body = BodyScreen:new{
+        dimen   = Geom:new{ w = Screen:getWidth(), h = body_h },
+        on_back = function() InkstreamUI.on_return() end,
+    }
+    _body[1] = body
+
+    _container[1] = VerticalGroup:new{ _title_bar, _body, _tab_bar }
+    UIManager:setDirty(_container, "ui", _container.dimen)
+end
+
+-- Build and show whatever screen is currently on top. Frees the previous
+-- screen's cover BlitBuffers before the builder runs, so stale BBs are never
+-- painted and full-size images are not kept around.
+local function render(itemnumber)
+    local builder = current_builder()
+    local screen  = builder and builder() or { title = "Inkstream", items = {} }
+    _menu.current_screen = screen
+    Covers.free_all()
+    if screen.body then
+        render_body(screen)
+    else
+        render_menu(screen, itemnumber)
+    end
+    _menu:update_left_icon()
+end
 
 function InkstreamUI.set_root_builder(name, fn)
     _root_builders[name] = fn
+end
+
+-- Pop the stack (or close at the root); shared by the Menu footer/Back key,
+-- the body TitleBar back chevron and the body Back key.
+function InkstreamUI.on_return()
+    if _menu and #_menu.paths > 0 then
+        table.remove(_menu.paths)
+        render(nil)
+    else
+        InkstreamUI.close()
+    end
+    return true
 end
 
 -- Open Inkstream at the given root, or switch roots in place (resets the
@@ -254,8 +438,7 @@ function InkstreamUI.show(root_name)
         _menu.root_builder = _root_builders[root_name]
         _menu.paths        = {}
         _tab_bar:set_active(root_name)
-        _menu:render_screen(nil)
-        _menu:update_left_icon()
+        render(nil)
         return
     end
 
@@ -271,24 +454,15 @@ function InkstreamUI.show(root_name)
         show_parent = _container,
         callback    = function(tab_name) InkstreamUI.show(tab_name) end,
     }
-    _container[1] = VerticalGroup:new{ _menu, _tab_bar }
     UIManager:show(_container)
-end
-
--- Row text with a second line (e.g. title + author). Menu turns "\n" into a
--- space, but keeps U+2028 LINE SEPARATOR, which its text box breaks on.
--- Screens using this should set items_per_page so rows are tall enough.
-function InkstreamUI.two_lines(first, second)
-    if not second or second == "" then return first end
-    return first .. "\226\128\168" .. second  -- U+2028
+    render(nil)
 end
 
 -- Push a screen onto the stack.
 function InkstreamUI.push(builder)
     if not _menu then return end
     table.insert(_menu.paths, builder)
-    _menu:render_screen(nil)
-    _menu:update_left_icon()
+    render(nil)
 end
 
 -- Rebuild the current screen in place, keeping the current page
@@ -296,16 +470,19 @@ end
 function InkstreamUI.rebuild_current(to_top)
     if not _menu then return end
     local itemnumber = not to_top and (_menu.page - 1) * (_menu.perpage or 1) + 1 or nil
-    _menu:render_screen(itemnumber)
+    render(itemnumber)
 end
 
 function InkstreamUI.close()
+    Covers.free_all()
     if _container then
         UIManager:close(_container)
         _container = nil
     end
-    _menu    = nil
-    _tab_bar = nil
+    _menu      = nil
+    _tab_bar   = nil
+    _title_bar = nil
+    _body      = nil
     free_detail_cover()
 end
 

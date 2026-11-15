@@ -1,4 +1,5 @@
--- Settings popup: toggle cover display per screen, choose the live books folder.
+-- Settings popup: toggle cover display per screen, choose the live books folder,
+-- check for updates (the title shows the installed version).
 -- Reopens itself after each change so the button labels stay current.
 local UIManager         = require("ui/uimanager")
 local InfoMessage       = require("ui/widget/infomessage")
@@ -96,7 +97,7 @@ function SettingsDialog.show()
     if _dlg then UIManager:close(_dlg) end
 
     _dlg = ButtonDialogTitle:new{
-        title   = "Inkstream Settings",
+        title   = "Inkstream Settings  ·  v" .. (_G.INKSTREAM_VERSION or "?"),
         buttons = {
             {
                 {
@@ -149,6 +150,16 @@ function SettingsDialog.show()
                     text     = "Chapters per volume: "
                         .. tostring(Settings:get("volume_size") or 200),
                     callback = choose_volume_size,
+                },
+            },
+            {
+                {
+                    text     = "Check for updates",
+                    callback = function()
+                        UIManager:close(_dlg)
+                        _dlg = nil
+                        require("core.updater").checkNow()
+                    end,
                 },
             },
             {

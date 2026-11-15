@@ -1,10 +1,14 @@
 -- Library screen: the tracked novels list. "Check for new chapters" is the
 -- first (bold) row; novel rows open the novel screen and support
--- hold-to-untrack.
+-- hold-to-untrack. When covers_library is on, each row shows a cover
+-- thumbnail on the left (the stored cover URL, falling back to the older
+-- source+path cover cache for novels tracked before the URL was saved).
 local UIManager   = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox  = require("ui/widget/confirmbox")
 local DB          = require("core.db")
+local Settings    = require("settings")
+local Covers      = require("core.covers")
 
 local Library = {}
 Library.on_novel_tap = nil
@@ -102,13 +106,15 @@ function Library.build_screen()
             callback = function() InkstreamUI.show("browse") end,
         })
     else
+        local cover_urls = {}
         for _, n in ipairs(novels) do
             local novel = n
             local new   = novel.new_chapters or 0
             local badge = new > 0 and ("  [+" .. new .. " new]") or ""
             local ch    = novel.total_chapters or 0
-            table.insert(items, {
-                text = InkstreamUI.two_lines((novel.title or "Unknown") .. badge, novel.author),
+            local entry = {
+                text = (novel.title or "Unknown") .. badge,
+                subtitle = novel.author,
                 mandatory = ch .. " ch",
                 bold = new > 0,
                 callback = function()
@@ -123,8 +129,18 @@ function Library.build_screen()
                         end,
                     })
                 end,
-            })
+            }
+            if Settings:get("covers_library") then
+                if novel.cover and novel.cover ~= "" then
+                    entry.cover_url = novel.cover
+                    cover_urls[#cover_urls + 1] = novel.cover
+                else
+                    entry.cover_data = DB.loadCoverCache(novel.source_id, novel.path)
+                end
+            end
+            table.insert(items, entry)
         end
+        Covers.request(cover_urls, rebuild)
     end
 
     return { title = "Library", items = items, items_per_page = 8 }

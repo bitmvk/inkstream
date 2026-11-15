@@ -5,7 +5,7 @@ local DataStorage = require("datastorage")
 
 local DEFAULTS = {
     covers_library  = true,
-    covers_browse   = false,
+    covers_browse   = true,
     covers_detail   = true,
     repos           = {},
     extension_settings = {},
