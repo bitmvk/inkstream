@@ -1,6 +1,7 @@
--- core/updater.lua — Inkstream manual OTA updater
+-- core/updater.lua — Inkstream OTA updater
 -- Checks GitHub releases API, downloads inkstream.koplugin.zip, unzips in-place,
--- deletes the zip, then offers a KOReader restart.
+-- deletes the zip, then offers a KOReader restart. autoCheck() runs silently
+-- when Inkstream opens and only speaks up when a newer release exists.
 
 local UIManager   = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
@@ -61,6 +62,7 @@ local function _request(url, sink, extra_headers)
         url     = url,
         sink    = sink,
         headers = headers,
+        timeout = 20,
     }
     return ok, code, resp_headers
 end
@@ -229,72 +231,109 @@ local function apply_update(download_url, new_version)
     end)
 end
 
+-- Ask whether to install release ({ version, download_url, notes }).
+local function offer_update(release, current)
+    local header = "Inkstream v" .. release.version .. " is available!\n"
+                .. "You have v" .. current .. "."
+    local notes  = release.notes
+                and ("\n\nWhat's new:\n" .. release.notes)
+                or  ""
+    UIManager:show(ConfirmBox:new{
+        text        = header .. notes .. "\n\nDownload and install now?",
+        ok_text     = "Install",
+        cancel_text = "Later",
+        ok_callback = function()
+            apply_update(release.download_url, release.version)
+        end,
+    })
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────────
 
-function Updater.checkForUpdates()
-    local NetworkMgr = require("ui/network/manager")
-    NetworkMgr:runWhenOnline(function()
-        local checking = InfoMessage:new{ text = "Checking for updates…", timeout = 15 }
-        UIManager:show(checking)
-
-        UIManager:scheduleIn(0.3, function()
-            local body, fetch_err = http_get(API_URL)
-            UIManager:close(checking)
-
-            if not body then
-                logger.err("Inkstream/Updater: fetch failed:", fetch_err)
-                UIManager:show(InfoMessage:new{
-                    text    = "Could not reach GitHub: " .. tostring(fetch_err),
-                    timeout = 4,
-                })
-                return
+-- Installed extensions whose repo index lists a different version.
+-- Runs in the update-check subprocess (network); returns plain metadata.
+local function find_extension_updates()
+    local ExtMgr = require("core.extmgr")
+    ExtMgr.fetchIndex()
+    local list = {}
+    for _, inst in ipairs(ExtMgr.installed()) do
+        if ExtMgr.hasUpdate(inst.id) then
+            for _, meta in ipairs(ExtMgr.available()) do
+                if meta.id == inst.id then
+                    list[#list + 1] = { meta = meta, from = inst.version }
+                end
             end
+        end
+    end
+    return list
+end
 
-            local release, parse_err = parse_release(body)
-            if not release then
-                logger.err("Inkstream/Updater: parse failed:", parse_err)
+-- Ask whether to update the listed extensions, then install them all.
+local function offer_extension_updates(list)
+    local lines = {}
+    for _, u in ipairs(list) do
+        lines[#lines + 1] = "• " .. (u.meta.name or u.meta.id) .. ": v"
+            .. tostring(u.from) .. " → v" .. tostring(u.meta.version)
+    end
+    UIManager:show(ConfirmBox:new{
+        text        = "Source updates available:\n\n"
+                   .. table.concat(lines, "\n") .. "\n\nUpdate now?",
+        ok_text     = "Update all",
+        cancel_text = "Later",
+        ok_callback = function()
+            local msg = InfoMessage:new{ text = "Updating sources…" }
+            UIManager:show(msg)
+            UIManager:scheduleIn(0.3, function()
+                local ExtMgr, failed = require("core.extmgr"), {}
+                for _, u in ipairs(list) do
+                    local ok = ExtMgr.install(u.meta)
+                    if not ok then failed[#failed + 1] = u.meta.name or u.meta.id end
+                end
+                UIManager:close(msg)
                 UIManager:show(InfoMessage:new{
-                    text    = "Could not read release info.",
-                    timeout = 4,
-                })
-                return
-            end
-
-            local current = current_version()
-            logger.info("Inkstream/Updater: current=", current, "latest=", release.version)
-
-            if not version_gt(release.version, current) then
-                UIManager:show(InfoMessage:new{
-                    text    = "Inkstream is up to date (v" .. current .. ").",
+                    text = #failed == 0 and "Sources updated."
+                        or ("Could not update: " .. table.concat(failed, ", ")),
                     timeout = 3,
                 })
-                return
-            end
+            end)
+        end,
+    })
+end
 
-            if not release.download_url then
-                UIManager:show(InfoMessage:new{
-                    text    = "Inkstream v" .. release.version
-                           .. " is available but has no download file yet.",
-                    timeout = 5,
-                })
-                return
-            end
-
-            local header = "Inkstream v" .. release.version .. " is available!\n"
-                        .. "You have v" .. current .. "."
-            local notes  = release.notes
-                        and ("\n\nWhat's new:\n" .. release.notes)
-                        or  ""
-
-            UIManager:show(ConfirmBox:new{
-                text        = header .. notes .. "\n\nDownload and install now?",
-                ok_text     = "Install",
-                cancel_text = "Cancel",
-                ok_callback = function()
-                    apply_update(release.download_url, release.version)
-                end,
-            })
-        end)
+-- Silent check, run when Inkstream opens: at most once per KOReader session,
+-- only when online (open_inkstream turns Wi-Fi on first), the requests run in
+-- a subprocess so a slow network cannot freeze the UI. Checks Inkstream itself
+-- and the installed source extensions; shows nothing unless something newer
+-- exists.
+local _auto_checked = false
+function Updater.autoCheck()
+    if _auto_checked then return end
+    if not require("ui/network/manager"):isConnected() then return end
+    _auto_checked = true
+    local BgTask = require("core.bgtask")
+    BgTask.start("update-check", BgTask.child(function()
+        local result = { ok = true }
+        local body = http_get(API_URL)
+        local release = body and parse_release(body)
+        if release then
+            result.version      = release.version
+            result.download_url = release.download_url
+            result.notes        = release.notes
+        end
+        local ok_ext, ext_updates = pcall(find_extension_updates)
+        result.extensions = ok_ext and ext_updates or {}
+        return result
+    end), function(data)
+        if not (data and data.ok) then return end
+        if data.extensions and #data.extensions > 0 then
+            offer_extension_updates(data.extensions)
+        end
+        local current = current_version()
+        if data.download_url and version_gt(data.version, current) then
+            offer_update(data, current)
+        else
+            logger.dbg("Inkstream/Updater: auto check, Inkstream up to date", current)
+        end
     end)
 end
 

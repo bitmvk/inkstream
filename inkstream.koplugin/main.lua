@@ -1,5 +1,5 @@
 -- Inkstream — main plugin entry point.
-_G.INKSTREAM_VERSION = "0.1.0"
+_G.INKSTREAM_VERSION = "0.1.1"
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager       = require("ui/uimanager")
@@ -24,6 +24,17 @@ end
 _G.inkstream_close_all = close_all
 
 local _ready = false
+
+-- Turn Wi-Fi on (no prompt, whatever KOReader's Wi-Fi setting says) and run
+-- callback once connected. If Wi-Fi cannot be turned on, nothing happens and
+-- Inkstream stays open for offline use. Devices that manage Wi-Fi themselves
+-- (Android, desktop) are left alone.
+local function go_online(callback)
+    local NetworkMgr = require("ui/network/manager")
+    if NetworkMgr:isConnected() then return callback() end
+    if not require("device"):hasWifiToggle() then return end
+    NetworkMgr:turnOnWifiAndWaitForConnection(callback)
+end
 
 local function open_inkstream()
     local ok, err = pcall(function()
@@ -60,6 +71,8 @@ local function open_inkstream()
         end
 
         InkstreamUI.show("library")
+        -- Protected: a Wi-Fi failure must never take Inkstream down with it.
+        pcall(go_online, function() require("core.updater").autoCheck() end)
     end)
 
     if not ok then
@@ -399,6 +412,12 @@ end
 function Inkstream:onInkstreamOpen()
     open_inkstream()
     return true
+end
+
+-- Launcher for other plugins: Simple UI's "KOReader plugin" Quick Action
+-- looks for a method named launch/show/open to call.
+function Inkstream:launch()
+    open_inkstream()
 end
 
 -- Resume queued downloads when KOReader regains a connection. The downloader

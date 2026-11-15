@@ -20,10 +20,6 @@ local VerticalSpan    = require("ui/widget/verticalspan")
 
 local Screen = Device.screen
 
--- Absolute path to the plugin root (computed once at load time from this file's path)
-local _PLUGIN_ROOT = (debug.getinfo(1, "S").source or ""):match("^@(.+)/ui/panel%.lua$") or ""
-local _LOGO_PATH   = _PLUGIN_ROOT .. "/resources/logo.png"
-
 local P = {}
 
 -- Tracks consecutive partial (page-turn) refreshes so we can promote to
@@ -106,21 +102,31 @@ function P.makeRow(text, opts)
     local small_face = Font:getFace("cfont", 14)
     local fgcolor    = opts.dim and Blitbuffer.COLOR_GRAY or Blitbuffer.COLOR_BLACK
 
+    -- The hint (if any) is built first so the label can be truncated with
+    -- an ellipsis to leave it room, instead of both running off-screen.
+    local hint
+    if opts.mandatory and opts.mandatory ~= "" then
+        hint = TextWidget:new{
+            text      = tostring(opts.mandatory),
+            face      = small_face,
+            bold      = opts.mandatory_bold or false,
+            fgcolor   = opts.mandatory_bold and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
+            max_width = math.floor(P.W / 2),
+        }
+    end
+    local label_max = P.W - 2 * P.MARGIN
+        - (hint and (hint:getSize().w + P.MARGIN) or 0)
+
     local label = TextWidget:new{
-        text    = text or "",
-        face    = face,
-        bold    = opts.bold,
-        fgcolor = fgcolor,
+        text      = text or "",
+        face      = face,
+        bold      = opts.bold,
+        fgcolor   = fgcolor,
+        max_width = label_max,
     }
 
     local inner
-    if opts.mandatory and opts.mandatory ~= "" then
-        local hint = TextWidget:new{
-            text    = tostring(opts.mandatory),
-            face    = small_face,
-            bold    = opts.mandatory_bold or false,
-            fgcolor = opts.mandatory_bold and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_GRAY,
-        }
+    if hint then
         inner = HorizontalGroup:new{
             label,
             HorizontalSpan:new{ width = P.MARGIN },
@@ -198,259 +204,17 @@ function P.makeImageRow(bb)
     }
 end
 
--- ── About popup ───────────────────────────────────────────────────────────────
-
-local AboutWidget = InputContainer:extend{}
-
-function AboutWidget:init()
-    local W, H    = P.W, P.H
-    local BOX_W   = math.floor(W * 0.85)
-    local PADDING = Screen:scaleBySize(28)
-    local INNER_W = BOX_W - 2 * PADDING
-    local version = _G.INKSTREAM_VERSION or "0.1.0"
-
-    -- ── Logo ──────────────────────────────────────────────────────────────────
-    local logo_w = nil
-    do
-        local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
-        if not ok_lfs then ok_lfs, lfs = pcall(require, "lfs") end
-        if ok_lfs and lfs.attributes(_LOGO_PATH, "mode") == "file" then
-            local logo_px    = Screen:scaleBySize(96)
-            local ImageWidget = require("ui/widget/imagewidget")
-            logo_w = CenterContainer:new{
-                dimen = Geom:new{ w = INNER_W, h = logo_px },
-                -- alpha = true composites over the white box background,
-                -- so transparent areas show white instead of black
-                ImageWidget:new{
-                    file   = _LOGO_PATH,
-                    width  = logo_px,
-                    height = logo_px,
-                    alpha  = true,
-                },
-            }
-        end
-    end
-
-    -- ── Descriptor text (word-wrapped) ────────────────────────────────────────
-    local TextBoxWidget = require("ui/widget/textboxwidget")
-    local desc = TextBoxWidget:new{
-        text      = "A simple web novel library for KOReader.\nBrowse, track, and export your favourite stories as EPUBs to read offline.",
-        face      = Font:getFace("cfont", 14),
-        width     = INNER_W,
-        alignment = "center",
-    }
-
-    -- ── Assemble content ──────────────────────────────────────────────────────
-    local group_args = { align = "center" }
-    if logo_w then
-        group_args[#group_args + 1] = logo_w
-        group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(14) }
-    end
-    group_args[#group_args + 1] = TextWidget:new{
-        text = "Inkstream",
-        face = Font:getFace("cfont", 24),
-        bold = true,
-    }
-    group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(4) }
-    group_args[#group_args + 1] = TextWidget:new{
-        text    = "v" .. version,
-        face    = Font:getFace("cfont", 15),
-        fgcolor = Blitbuffer.COLOR_GRAY,
-    }
-    group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(22) }
-    group_args[#group_args + 1] = desc
-    group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(16) }
-    group_args[#group_args + 1] = TextWidget:new{
-        text    = "github.com/bitmvk/inkstream",
-        face    = Font:getFace("cfont", 13),
-        fgcolor = Blitbuffer.COLOR_GRAY,
-    }
-    group_args[#group_args + 1] = VerticalSpan:new{ width = Screen:scaleBySize(22) }
-    group_args[#group_args + 1] = TextWidget:new{
-        text    = "tap anywhere to close",
-        face    = Font:getFace("cfont", 12),
-        fgcolor = Blitbuffer.COLOR_LIGHT_GRAY,
-    }
-
-    local content = VerticalGroup:new(group_args)
-    local box = FrameContainer:new{
-        bordersize = Screen:scaleBySize(1),
-        radius     = Screen:scaleBySize(8),
-        background = Blitbuffer.COLOR_WHITE,
-        padding    = PADDING,
-        content,
-    }
-    self[1] = CenterContainer:new{
-        dimen = Geom:new{ x = 0, y = 0, w = W, h = H },
-        box,
-    }
-    self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
-    if Device:hasKeys() then
-        self.key_events = { Close = { { Device.input.group.Back } } }
-    end
-    self.ges_events = { Tap = { GestureRange:new{ ges = "tap", range = self.dimen } } }
-end
-function AboutWidget:onTap()    UIManager:close(self); return true end
-function AboutWidget:onClose()  UIManager:close(self); return true end
-function AboutWidget:onShow()
-    UIManager:setDirty(self, function() return "ui", self.dimen end)
-end
-function AboutWidget:onCloseWidget()
-    UIManager:setDirty(self, function() return "partial", self.dimen end)
-end
-
--- ── Hamburger menu ────────────────────────────────────────────────────────────
-
-function P.showHamburgerMenu(close_fn)
-    local InfoMessage = require("ui/widget/infomessage")
-    local W, H   = P.W, P.H
-    local MENU_W = Screen:scaleBySize(220)
-    local ITEM_H = Screen:scaleBySize(48)
-    local BORDER = Screen:scaleBySize(1)
-    local face   = Font:getFace("cfont", 16)
-
-    -- Position dropdown flush right, just below the title bar
-    local menu_x    = W - MENU_W
-    local menu_y    = P.TITLE_H
-    local n         = 3
-    local inner_w   = MENU_W - 2 * BORDER
-    local total_h   = n * ITEM_H + (n - 1) * BORDER + 2 * BORDER
-    local menu_rect = Geom:new{ x = menu_x, y = menu_y, w = MENU_W, h = total_h }
-
-    local dropdown  -- forward declaration
-
-    local function close_menu() UIManager:close(dropdown) end
-
-    local items = {
-        { "About", function()
-            close_menu()
-            UIManager:show(AboutWidget:new{})
-        end },
-        { "Check for Updates",
-            function()
-                close_menu()
-                require("core.updater").checkForUpdates()
-            end,
-        },
-        { "Quit Inkstream", function()
-            close_menu()
-            close_fn()
-        end },
-    }
-
-    -- Pre-compute each item's screen rect for hit-testing in onTap.
-    -- Layout inside menu_box (FrameContainer bordersize=BORDER):
-    --   top BORDER, then item/separator pairs, then bottom BORDER.
-    local item_rects = {}
-    local iy = menu_y + BORDER
-    for i = 1, n do
-        item_rects[i] = Geom:new{ x = menu_x + BORDER, y = iy, w = inner_w, h = ITEM_H }
-        iy = iy + ITEM_H + BORDER
-    end
-
-    -- Build plain (non-tappable) item rows — taps are handled entirely in onTap.
-    local item_widgets = {}
-    for i, item in ipairs(items) do
-        local lbl   = TextWidget:new{ text = item[1], face = face }
-        local lbl_h = lbl:getSize().h
-        local pad_v = math.max(0, math.floor((ITEM_H - lbl_h) / 2))
-        local frame = FrameContainer:new{
-            bordersize     = 0,
-            padding_left   = Screen:scaleBySize(16),
-            padding_right  = Screen:scaleBySize(16),
-            padding_top    = pad_v,
-            padding_bottom = math.max(0, ITEM_H - lbl_h - pad_v),
-            width          = inner_w,
-            background     = Blitbuffer.COLOR_WHITE,
-            lbl,
-        }
-        table.insert(item_widgets, frame)
-        if i < n then
-            table.insert(item_widgets, LineWidget:new{
-                background = Blitbuffer.COLOR_LIGHT_GRAY,
-                dimen      = Geom:new{ w = inner_w, h = BORDER },
-            })
-        end
-    end
-
-    local vg_items = { align = "left" }
-    for _, w in ipairs(item_widgets) do table.insert(vg_items, w) end
-    local menu_box = FrameContainer:new{
-        bordersize = BORDER,
-        background = Blitbuffer.COLOR_WHITE,
-        padding    = 0,
-        VerticalGroup:new(vg_items),
-    }
-
-    -- Dropdown widget: full-screen for input capture, box painted at (menu_x, menu_y).
-    -- All tap handling is done here — never propagated to lower widgets.
-    local DropdownMenu = InputContainer:extend{}
-    function DropdownMenu:init()
-        self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
-        self[1]    = menu_box
-        local full = Geom:new{ x = 0, y = 0, w = W, h = H }
-        self.ges_events = {
-            Tap  = { GestureRange:new{ ges = "tap",  range = full } },
-            Hold = { GestureRange:new{ ges = "hold", range = full } },
-        }
-    end
-    function DropdownMenu:paintTo(bb, x, y)
-        self.dimen.x = x
-        self.dimen.y = y
-        self[1]:paintTo(bb, menu_x, menu_y)
-    end
-    function DropdownMenu:onTap(_, ges)
-        if not ges.pos then return true end
-        if not ges.pos:intersectWith(menu_rect) then
-            UIManager:close(self)
-            return true
-        end
-        for i, rect in ipairs(item_rects) do
-            if ges.pos:intersectWith(rect) then
-                items[i][2]()
-                return true
-            end
-        end
-        return true
-    end
-    function DropdownMenu:onHold(_, ges)
-        if not ges.pos then return true end
-        if not ges.pos:intersectWith(menu_rect) then
-            UIManager:close(self)
-            return true
-        end
-        for i, rect in ipairs(item_rects) do
-            if ges.pos:intersectWith(rect) and items[i][3] then
-                items[i][3]()
-                return true
-            end
-        end
-        return true
-    end
-    function DropdownMenu:onShow()
-        UIManager:setDirty(self, function() return "ui", self.dimen end)
-    end
-    function DropdownMenu:onCloseWidget()
-        UIManager:setDirty(self, function() return "partial", self.dimen end)
-    end
-
-    dropdown = DropdownMenu:new{}
-    UIManager:show(dropdown)
-end
-
 -- ── Title bar ─────────────────────────────────────────────────────────────────
 -- on_back:  ← callback (nil = no back button)
 -- on_close: ✕ callback (nil = no close button)
--- on_menu:  ≡ callback (nil = no menu button); overrides on_close if both set
+-- on_refresh: ↻ callback, shown left when there is no back button
 
-function P.makeTitleBar(title, on_back, on_close, on_menu, on_refresh)
+function P.makeTitleBar(title, on_back, on_close, on_refresh)
     local H     = P.TITLE_H
     local W     = P.W
     local face  = Font:getFace("cfont", 18)
     local bface = Font:getFace("cfont", 22)
 
-    local right_cb    = on_menu or on_close
-    local right_glyph = on_menu and "≡" or "✕"
     local BTN_W = Screen:scaleBySize(48)
     local mid_w = W - 2 * BTN_W  -- always symmetric so title is truly centered
 
@@ -490,7 +254,7 @@ function P.makeTitleBar(title, on_back, on_close, on_menu, on_refresh)
     return HorizontalGroup:new{
         left,
         title_frame,
-        right_cb and btnFrame(right_glyph, right_cb) or spacer(),
+        on_close and btnFrame("✕", on_close) or spacer(),
     }
 end
 
@@ -791,11 +555,10 @@ end
 -- Separated from show so main_widget can swap it in-place for page turns / tab switches.
 local function _buildTabBody(active_id, rows, title, close_fn, nav)
     local content_h  = nav and P.CONTENT_H_NAV or P.CONTENT_H
-    local menu_fn    = function() P.showHamburgerMenu(close_fn) end
     local refresh_fn = function() UIManager:setDirty(nil, "full") end
     return VerticalGroup:new{
         align = "left",
-        P.makeTitleBar(title, nil, nil, menu_fn, refresh_fn),
+        P.makeTitleBar(title, nil, close_fn, refresh_fn),
         P.hairline(),
         P.contentFrame(rows, content_h),
         nav and P.makeNavBar(nav) or P.spacer(0),

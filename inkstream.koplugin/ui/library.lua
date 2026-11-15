@@ -113,7 +113,9 @@ function Library.build_rows()
             local ch     = novel.total_chapters or 0
             table.insert(novel_rows, P.makeRow(
                 (novel.title or "Unknown") .. badge, {
-                    mandatory = src .. "  ·  " .. ch .. " ch",
+                    mandatory = (novel.author and novel.author ~= ""
+                                    and (novel.author .. "  ·  ") or "")
+                                .. src .. "  ·  " .. ch .. " ch",
                     bold      = new > 0,
                     callback  = function()
                         if Library.on_novel_tap then Library.on_novel_tap(novel) end
