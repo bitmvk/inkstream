@@ -1,5 +1,5 @@
 -- Inkstream — main plugin entry point.
-_G.INKSTREAM_VERSION = "1.2.2"
+_G.INKSTREAM_VERSION = "1.2.3"
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager       = require("ui/uimanager")
@@ -15,6 +15,7 @@ local logger    = require("logger")
 local Live      = require("core.live")
 local LiveBook  = require("core.livebook")
 local BgTask    = require("core.bgtask")
+local DB        = require("core.db")
 
 -- Close-all helper: shuts every Inkstream widget
 local function close_all()
@@ -246,6 +247,9 @@ local function start_refresh_list(self)
             _live.refreshed_end = false  -- allow another check at the new end
             state.total = total
             LiveBook.save_state(state)
+            -- Keep the Library's chapter total (and so its new-chapter badge)
+            -- in step with the chapter list just fetched.
+            DB.update(source_id, novel_path, { total_chapters = total })
             UIManager:show(InfoMessage:new{
                 text = (total - old_total) .. " new chapter(s) found", timeout = 3 })
             if state.mode == "full" then
@@ -512,6 +516,8 @@ function Inkstream:onReaderReady()
     if cur then
         _live.cur = cur
         LiveBook.set_cur(state, cur)
+        -- Reaching a chapter clears it from the Library's new-chapter badge.
+        DB.markSeenUpTo(state.source_id, state.novel_path, cur)
     end
 
     if not chapters then
@@ -617,6 +623,9 @@ function Inkstream:onPageUpdate()
     if not cur then return end  -- front matter
     _live.cur = cur
     LiveBook.set_cur(state, cur)
+    -- Reaching a chapter clears it from the Library's new-chapter badge, even
+    -- while a background task is running (hence before the task guard below).
+    DB.markSeenUpTo(state.source_id, state.novel_path, cur)
 
     if _live.task then return end  -- one background task at a time
 

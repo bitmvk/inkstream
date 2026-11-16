@@ -68,14 +68,22 @@ function DB.find(source_id, path)
     return nil
 end
 
+-- Badge rule: new_chapters counts the chapters the reader has not reached
+-- yet.  last_seen_count is the highest chapter reached; entries written
+-- before it existed fall back to the total that was known back then.
+local function recount(n, prev_total)
+    n.last_seen_count = n.last_seen_count or prev_total or 0
+    n.new_chapters    = math.max(0, (n.total_chapters or 0) - n.last_seen_count)
+end
+
 -- Track or update a novel.  novel must have: title, source_id, path
 function DB.track(novel)
     local data = load()
     for i, n in ipairs(data.novels) do
         if n.source_id == novel.source_id and n.path == novel.path then
-            local prev_ch = n.total_chapters or 0
+            local prev_total = n.total_chapters or 0
             for k, v in pairs(novel) do n[k] = v end
-            n.new_chapters = math.max(0, (n.total_chapters or 0) - prev_ch)
+            recount(n, prev_total)
             data.novels[i] = n
             save()
             return n
@@ -108,9 +116,9 @@ function DB.update(source_id, path, fields)
     local data = load()
     for i, n in ipairs(data.novels) do
         if n.source_id == source_id and n.path == path then
-            local prev_ch = n.last_seen_count or n.total_chapters or 0
+            local prev_total = n.total_chapters or 0
             for k, v in pairs(fields) do n[k] = v end
-            n.new_chapters = math.max(0, (n.total_chapters or 0) - prev_ch)
+            recount(n, prev_total)
             data.novels[i] = n
             save()
             return n
@@ -119,15 +127,24 @@ function DB.update(source_id, path, fields)
     return nil
 end
 
--- Mark all new chapters as seen for a novel
-function DB.markSeen(source_id, path)
+-- Raise the reached-chapter marker to at least n and recount the badge.
+-- Called on every chapter change, so it only writes when a value changes.
+function DB.markSeenUpTo(source_id, path, n)
     local data = load()
-    for i, n in ipairs(data.novels) do
-        if n.source_id == source_id and n.path == path then
-            n.last_seen_count = n.total_chapters or 0
-            n.new_chapters    = 0
-            data.novels[i]    = n
-            save()
+    for i, nn in ipairs(data.novels) do
+        if nn.source_id == source_id and nn.path == path then
+            local old_seen = nn.last_seen_count
+            local old_new  = nn.new_chapters
+            local seen = math.max(nn.last_seen_count or 0, n or 0)
+            if nn.total_chapters and seen > nn.total_chapters then
+                seen = nn.total_chapters
+            end
+            nn.last_seen_count = seen
+            nn.new_chapters    = math.max(0, (nn.total_chapters or 0) - seen)
+            if nn.last_seen_count ~= old_seen or nn.new_chapters ~= old_new then
+                data.novels[i] = nn
+                save()
+            end
             return
         end
     end
