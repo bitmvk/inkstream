@@ -83,9 +83,10 @@ end
 local function http_download(url, dest)
     local ltn12 = require("ltn12")
 
-    -- First request: may return 302 with a Location header.
-    local headers_only = {}
-    local ok, code, resp_headers = _request(url, ltn12.sink.table(headers_only), nil)
+    -- First request: may return 302 with a Location header. Discard the body:
+    -- when the URL answers 200 directly it is the whole zip, and buffering it
+    -- in memory would double both the memory and the traffic of the install.
+    local ok, code, resp_headers = _request(url, ltn12.sink.null(), nil)
     logger.dbg("Inkstream/Updater: download probe", url, "→", tostring(code))
 
     local final_url = url
@@ -184,7 +185,12 @@ end
 
 -- ── Install ───────────────────────────────────────────────────────────────────
 
+-- One install at a time: a second one would download over the same temp zip
+-- and unzip into the plugin folder while the first is still writing to it.
+local _installing = false
 local function apply_update(download_url, new_version)
+    if _installing then return end
+    _installing = true
     local zip = tmp_zip_path()
 
     local progress = InfoMessage:new{
@@ -194,41 +200,61 @@ local function apply_update(download_url, new_version)
     UIManager:show(progress)
 
     UIManager:scheduleIn(0.3, function()
-        local dl_ok, dl_err = http_download(download_url, zip)
-        UIManager:close(progress)
+        -- Download and unzip in a subprocess: both block for many seconds (a
+        -- stalled socket can block far longer), and doing that on the UI
+        -- thread freezes KOReader and any book open behind it.
+        local BgTask = require("core.bgtask")
+        local task = BgTask.start("update-install", BgTask.child(function()
+            local dl_ok, dl_err = http_download(download_url, zip)
+            if not dl_ok then
+                pcall(os.remove, zip)
+                return { ok = false, step = "download", error = tostring(dl_err) }
+            end
 
-        if not dl_ok then
-            logger.err("Inkstream/Updater: download failed:", dl_err)
+            logger.dbg("Inkstream/Updater: unzipping", zip, "→", _parent_dir)
+            local ret = os.execute(
+                string.format("unzip -o -q %q -d %q", zip, _parent_dir)
+            )
+            os.remove(zip)
+
+            if ret ~= 0 and ret ~= true then
+                return { ok = false, step = "extract", error = tostring(ret) }
+            end
+            return { ok = true }
+        end), function(data)
+            _installing = false
+            UIManager:close(progress)
+
+            if not data or not data.ok then
+                local err = (data and data.error) or "subprocess failed"
+                logger.err("Inkstream/Updater: update failed:", tostring(err))
+                UIManager:show(InfoMessage:new{
+                    text    = (data and data.step == "extract")
+                        and "Extraction failed. Please update manually."
+                        or  ("Download failed: " .. tostring(err)),
+                    timeout = 5,
+                })
+                return
+            end
+
+            logger.info("Inkstream/Updater: update to", new_version, "installed")
+            UIManager:show(ConfirmBox:new{
+                text        = "Inkstream v" .. new_version
+                           .. " installed.\n\nRestart KOReader to apply the update?",
+                ok_text     = "Restart now",
+                cancel_text = "Later",
+                ok_callback = function() UIManager:restartKOReader() end,
+            })
+        end)
+
+        if not task then
+            _installing = false
+            UIManager:close(progress)
             UIManager:show(InfoMessage:new{
-                text    = "Download failed: " .. tostring(dl_err),
+                text    = "Could not start the download. Please try again.",
                 timeout = 5,
             })
-            return
         end
-
-        logger.dbg("Inkstream/Updater: unzipping", zip, "→", _parent_dir)
-        local ret = os.execute(
-            string.format("unzip -o -q %q -d %q", zip, _parent_dir)
-        )
-        os.remove(zip)
-
-        if ret ~= 0 and ret ~= true then
-            logger.err("Inkstream/Updater: unzip failed, exit=", tostring(ret))
-            UIManager:show(InfoMessage:new{
-                text    = "Extraction failed. Please update manually.",
-                timeout = 5,
-            })
-            return
-        end
-
-        logger.info("Inkstream/Updater: update to", new_version, "installed")
-        UIManager:show(ConfirmBox:new{
-            text        = "Inkstream v" .. new_version
-                       .. " installed.\n\nRestart KOReader to apply the update?",
-            ok_text     = "Restart now",
-            cancel_text = "Later",
-            ok_callback = function() UIManager:restartKOReader() end,
-        })
     end)
 end
 
@@ -305,12 +331,15 @@ end
 -- UI): Inkstream's latest GitHub release plus the installed source extensions.
 -- on_done(data) gets nil on failure, else { found, version, download_url,
 -- notes, extensions } where found = the GitHub release was read.
+-- Returns true when the check was started; nil, "busy" when one is already
+-- running, or nil, "fork" when the subprocess could not be forked (on_done
+-- then never runs).
 local _checking = false
 local function run_check(on_done)
-    if _checking then return end
+    if _checking then return nil, "busy" end
     _checking = true
     local BgTask = require("core.bgtask")
-    BgTask.start("update-check", BgTask.child(function()
+    local task = BgTask.start("update-check", BgTask.child(function()
         local result = { ok = true }
         local body = http_get(API_URL)
         local release = body and parse_release(body)
@@ -327,6 +356,13 @@ local function run_check(on_done)
         _checking = false
         on_done(data and data.ok and data or nil)
     end)
+    if not task then
+        -- No callback will ever run, so the flag must not stay set: it would
+        -- disable every later check for the rest of the session.
+        _checking = false
+        return nil, "fork"
+    end
+    return true
 end
 
 -- Offers whatever the check found. Returns true if anything was offered.
@@ -361,10 +397,13 @@ end
 
 -- Manual check from Settings: always says what it found.
 function Updater.checkNow()
-    require("ui/network/manager"):runWhenOnline(function()
+    -- runWhenConnected, not runWhenOnline: the latter never runs its callback
+    -- when Wi-Fi is connected but the connection is not verified online, so
+    -- the button would silently do nothing.
+    require("ui/network/manager"):runWhenConnected(function()
         local msg = InfoMessage:new{ text = "Checking for updates…" }
         UIManager:show(msg)
-        run_check(function(data)
+        local started, why = run_check(function(data)
             UIManager:close(msg)
             if data and data.found then _auto_checked = true end
             if data and offer_found(data) then return end
@@ -375,6 +414,16 @@ function Updater.checkNow()
                 timeout = 3,
             })
         end)
+        if not started then
+            -- Nothing will ever call back (another check owns the subprocess,
+            -- or the fork failed), so "Checking…" must not stay on screen.
+            UIManager:close(msg)
+            UIManager:show(InfoMessage:new{
+                text    = why == "busy" and "Update check already running."
+                    or  "Could not start the update check.",
+                timeout = 3,
+            })
+        end
     end)
 end
 

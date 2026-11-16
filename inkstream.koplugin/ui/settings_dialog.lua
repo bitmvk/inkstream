@@ -45,7 +45,11 @@ local function move_live_books(new_dir)
     if #skipped > 0 then
         text = text .. "\nSkipped:\n" .. table.concat(skipped, "\n")
     end
-    UIManager:show(InfoMessage:new{ text = text, timeout = #skipped > 0 and 6 or 4 })
+    -- The settings dialog is reopened right after the move and would hide
+    -- this report, so show it once the chooser dialogs have been closed.
+    UIManager:scheduleIn(0.1, function()
+        UIManager:show(InfoMessage:new{ text = text, timeout = #skipped > 0 and 6 or 4 })
+    end)
 end
 
 local function choose_live_folder()
@@ -77,20 +81,23 @@ end
 local function choose_volume_size()
     local options = { 100, 200, 300, 400, 500, 750, 1000 }
     local buttons = {}
+    local dlg
     for _, n in ipairs(options) do
         local v = n
         table.insert(buttons, {{
             text     = tostring(v) .. " chapters",
             callback = function()
+                UIManager:close(dlg)
                 Settings:set("volume_size", v)
                 SettingsDialog.show()
             end,
         }})
     end
-    UIManager:show(ButtonDialogTitle:new{
+    dlg = ButtonDialogTitle:new{
         title   = "Chapters per volume\n(applies to novels started after the change; existing novels keep their size)",
         buttons = buttons,
-    })
+    }
+    UIManager:show(dlg)
 end
 
 function SettingsDialog.show()

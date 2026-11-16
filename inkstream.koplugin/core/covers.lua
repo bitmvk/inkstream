@@ -104,15 +104,21 @@ local function fetch_bytes(url)
     local ok_p, http  = pcall(require, "socket.http")
     if not ok_h and not ok_p then return nil end
     local ltn12 = require("ltn12")
-    local sink = {}
     local req  = (ok_h and url:match("^https")) and https or http
     if not req then return nil end
+    -- luasocket ignores the request table's `timeout`; socketutil enforces one
+    -- (otherwise a stalled cover server hangs this BgTask child forever and
+    -- its done_cb never runs).
+    local ok_su, socketutil = pcall(require, "socketutil")
+    if ok_su then socketutil:set_timeout(15, 15) end
+    local sink = {}
+    local sink_fn = ok_su and socketutil.table_sink(sink) or ltn12.sink.table(sink)
     local ok, code = req.request{
         url     = url,
-        sink    = ltn12.sink.table(sink),
+        sink    = sink_fn,
         headers = { ["User-Agent"] = "Mozilla/5.0 (Linux; Android 9; KOReader)" },
-        timeout = 15,
     }
+    if ok_su then socketutil:reset_timeout() end
     if not ok or code ~= 200 then
         logger.warn("Inkstream/Covers: fetch failed", url, tostring(code))
         return nil
@@ -125,16 +131,28 @@ end
 function Covers.download_all(items)
     ensure_dir()
     local failed = {}
+    local downloaded = 0
     for _, it in ipairs(items or {}) do
         local p = covers_dir .. "/" .. it.key .. ".img"
         if lfs.attributes(p, "mode") ~= "file" then
             local data = fetch_bytes(it.url)
             if data then
-                local f = io.open(p, "wb")
-                if f then
-                    f:write(data)
+                -- Write via a temp file + rename: a truncated .img (power
+                -- loss, killed child) would look cached to Covers.has() and
+                -- never be fetched again, only rendering as a grey placeholder.
+                local tmp = p .. ".part"
+                local f = io.open(tmp, "wb")
+                if f and f:write(data) then
                     f:close()
+                    if os.rename(tmp, p) then
+                        downloaded = downloaded + 1
+                    else
+                        os.remove(tmp)
+                        failed[#failed + 1] = it.key
+                    end
                 else
+                    if f then f:close() end
+                    os.remove(tmp)
                     failed[#failed + 1] = it.key
                 end
             else
@@ -142,7 +160,7 @@ function Covers.download_all(items)
             end
         end
     end
-    return { failed = failed }
+    return { failed = failed, downloaded = downloaded }
 end
 
 -- {key, url} list for the covers in `items` (each item may be a URL string or
@@ -159,7 +177,8 @@ function Covers.missing(items)
 end
 
 -- Download any missing covers in a BgTask child and call done_cb once the
--- child finishes (done_cb is not called when nothing needs downloading).
+-- child finishes (done_cb is not called when nothing needs downloading, and
+-- only when at least one cover actually arrived).
 function Covers.request(items, done_cb)
     local missing = Covers.missing(items)
     if #missing == 0 then return end
@@ -167,7 +186,12 @@ function Covers.request(items, done_cb)
     BgTask.start("covers", BgTask.child(function()
         local C = require("core.covers")
         return C.download_all(missing)
-    end), done_cb)
+    end), function(data)
+        -- The screen builders call Covers.request again when done_cb rebuilds,
+        -- so a rebuild after an all-failed download would retry the same URLs
+        -- forever.  Rebuilding only matters when a file actually arrived.
+        if done_cb and data and (data.downloaded or 0) > 0 then done_cb(data) end
+    end)
 end
 
 -- ── Memory ────────────────────────────────────────────────────────────────────

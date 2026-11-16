@@ -187,8 +187,20 @@ function ExtMgr.install(meta)
     ensure_dir()
     if not meta.url then return false, "no_url" end
     local dest = ext_dir .. "/" .. meta.id .. ".lua"
-    local ok, err = Http.download(meta.url, dest)
-    if not ok then return false, tostring(err) end
+    -- Download beside the target and rename only once the whole file arrived:
+    -- writing straight to dest would truncate the working version, so a failed
+    -- download or update would leave the source with no extension at all.
+    local tmp = dest .. ".part"
+    local ok, err = Http.download(meta.url, tmp)
+    if not ok then
+        os.remove(tmp)
+        return false, tostring(err)
+    end
+    local renamed, rename_err = os.rename(tmp, dest)
+    if not renamed then
+        os.remove(tmp)
+        return false, tostring(rename_err)
+    end
     _inst_meta[meta.id] = meta
     save_inst_meta()
     load_ext_file(meta.id)

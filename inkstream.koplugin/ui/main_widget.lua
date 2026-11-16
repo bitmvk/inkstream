@@ -255,17 +255,24 @@ local function two_line_row(item)
     if mandatory then
         table.insert(overlap, RightContainer:new{ dimen = box:copy(), mandatory })
     end
+    -- MenuItem:onFocus/onUnfocus recolour its _underline_container to draw the
+    -- focus indicator (DPad/key devices). Point that field at this row's
+    -- underline, keeping a colour the stock row may already have.
+    local underline = UnderlineContainer:new{
+        color = (item._underline_container and item._underline_container.color)
+            or item.line_color,
+        linesize = item.linesize,
+        vertical_align = "center", padding = 0,
+        dimen = Geom:new{ x = 0, y = 0, w = w, h = h },
+        overlap,
+    }
+    item._underline_container = underline
     return FrameContainer:new{
         bordersize = 0, padding = 0,
         HorizontalGroup:new{
             align = "center",
             HorizontalSpan:new{ width = item.items_padding or Size.padding.fullscreen },
-            UnderlineContainer:new{
-                color = item.line_color, linesize = item.linesize,
-                vertical_align = "center", padding = 0,
-                dimen = Geom:new{ x = 0, y = 0, w = w, h = h },
-                overlap,
-            },
+            underline,
             HorizontalSpan:new{ width = Size.padding.fullscreen },
         },
     }
@@ -284,7 +291,11 @@ function InkstreamMenu:updateItems(...)
         local e = item.entry
         if e and (e.subtitle or e.cover_url or e.cover_data)
                 and item.face and item.info_face and item.infont_size and item.content_width then
-            item[1] = two_line_row(item)
+            -- Build the replacement first (it reads the stock row's focus
+            -- colour), then release the stock row it replaces.
+            local row = two_line_row(item)
+            if item[1] then item[1]:free() end
+            item[1] = row
         end
     end
 end
@@ -359,7 +370,10 @@ end
 
 local function render_menu(screen, itemnumber)
     -- Swap the container back to the Menu (never clear(): WidgetContainer:clear
-    -- would free the long-lived _menu/_tab_bar instances).
+    -- would free the long-lived _menu/_tab_bar instances). A body screen's
+    -- title bar and body belong to that screen only, so release them here.
+    if _title_bar then _title_bar:free() end
+    if _body then _body:free() end
     _title_bar = nil
     _body      = nil
     _container[1] = VerticalGroup:new{ _menu, _tab_bar }
@@ -370,6 +384,10 @@ local function render_menu(screen, itemnumber)
 end
 
 local function render_body(screen)
+    -- Rebuilds come through here too: release the screen being replaced
+    -- before building its successor.
+    if _title_bar then _title_bar:free() end
+    if _body then _body:free() end
     -- Build the title bar first so its height is known for the body area.
     _title_bar = TitleBar:new{
         width              = Screen:getWidth(),
@@ -400,8 +418,9 @@ local function render_body(screen)
 end
 
 -- Build and show whatever screen is currently on top. Frees the previous
--- screen's cover BlitBuffers before the builder runs, so stale BBs are never
--- painted and full-size images are not kept around.
+-- screen's cover BlitBuffers first, before this screen's widgets are built
+-- (a custom body is built inside render_body), so stale BBs are never painted
+-- and full-size images are not kept around.
 local function render(itemnumber)
     local builder = current_builder()
     local screen  = builder and builder() or { title = "Inkstream", items = {} }

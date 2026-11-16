@@ -388,13 +388,23 @@ end
 function Search.start(state)
     local msg = InfoMessage:new{ text = "Searching…" }
     UIManager:show(msg)
-    BgTask.start("search-all", BgTask.child(function()
+    local task = BgTask.start("search-all", BgTask.child(function()
         return search_all(state.term)
     end), function(data)
         UIManager:close(msg)
         state.results = data or {}
         rebuild()
     end)
+    if not task then
+        -- The child never started (fork failure): report it per source instead
+        -- of leaving the modal message and the "Searching…" body up for good.
+        UIManager:close(msg)
+        state.results = {}
+        for _, meta in ipairs(ExtMgr.installed()) do
+            state.results[meta.id] = { error = "search failed to start" }
+        end
+        rebuild()
+    end
 end
 
 function Search.open()

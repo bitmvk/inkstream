@@ -62,14 +62,29 @@ end
 
 -- ── Batch core ────────────────────────────────────────────────────────────────
 
+-- True when the source still answers for a chapter other than `idx`.
+-- parseChapter returns nil both for a chapter that is gone at the source and
+-- for a plain network failure, so a neighbouring chapter is probed before a
+-- failed chapter is written off as permanently broken: an outage (Wi-Fi
+-- associated but no internet) must not fill the store with placeholders.
+local function source_reachable(ext, chapters, idx, total)
+    if not ext then return false end
+    local probe = idx < total and idx + 1 or idx - 1
+    local ch = probe >= 1 and chapters[probe] or nil
+    if not ch or not ch.path then return false end
+    local ok, html = pcall(ext.parseChapter, ext, ch.path)
+    return ok and html ~= nil
+end
+
 -- Download chapters from..to into the chapter store. A failed fetch stops
 -- the batch (downloaded stays contiguous; the chapter is retried next time),
 -- unless it has failed Downloader.FAIL_LIMIT batches in a row on the same
--- chapter — then a placeholder is stored and the chapter is reported as
--- `skipped` so the caller records it in state.failed_chapters and advances
--- past it. Runs in a forked child in production (where it only writes the
--- chapter store, never state), so the consecutive-failure bookkeeping is
--- returned here and applied by the parent.
+-- chapter and the source still answers for a neighbouring one (else it is a
+-- network problem, not a broken chapter) — then a placeholder is stored and
+-- the chapter is reported as `skipped` so the caller records it in
+-- state.failed_chapters and advances past it. Runs in a forked child in
+-- production (where it only writes the chapter store, never state), so the
+-- consecutive-failure bookkeeping is returned here and applied by the parent.
 -- Returns { downloaded, failed, total, skipped, fail_idx, fail_count }.
 function Downloader.download_range(state, ext, chapters, from, to)
     local total = #chapters
@@ -94,7 +109,8 @@ function Downloader.download_range(state, ext, chapters, from, to)
                 fail_idx = idx
                 fail_count = 1
             end
-            if fail_count >= Downloader.FAIL_LIMIT then
+            if fail_count >= Downloader.FAIL_LIMIT
+               and source_reachable(ext, chapters, idx, total) then
                 -- Permanently broken at the source: skip it so the rest of
                 -- the novel is not stalled. The placeholder keeps the volume
                 -- buildable and is replaced by the retry action on success.
@@ -109,6 +125,9 @@ function Downloader.download_range(state, ext, chapters, from, to)
                 fail_count = 0
                 n = idx
             else
+                -- Still failing, or the source is unreachable right now
+                -- (offline, extension not loaded): keep the chapter pending
+                -- and stop, the next batch retries it.
                 failed = idx
                 break
             end
@@ -166,10 +185,21 @@ function Downloader.rebuild_changed(state, before)
     local v_first = Live.volume_of(before + 1, V)
     local v_last  = Live.volume_of(d, V)
     local open_key, open_vol = Downloader.open_live_volume()
+    local open = open_key == state.key and open_vol or nil
+    -- Only one volume can be deferred (the one open in the reader; main.lua
+    -- rebuilds it on reloadDocument or when the document closes). Build a
+    -- volume deferred by an earlier batch that is no longer open: this batch
+    -- would overwrite the flag, and the chapters appended to it meanwhile
+    -- would otherwise never reach the file.
+    local rebuilt = state.pending_volume_rebuild
+    if rebuilt and rebuilt ~= open then
+        LiveBook.build_full_volume(state, rebuilt)
+        state.pending_volume_rebuild = nil
+    end
     for v = v_first, v_last do
-        if open_key == state.key and open_vol == v then
+        if open == v then
             state.pending_volume_rebuild = v
-        else
+        elseif v ~= rebuilt then
             LiveBook.build_full_volume(state, v)
         end
     end
@@ -286,7 +316,7 @@ function Downloader.start_batch(state)
     local key = state.key
     _task = BgTask.start("download",
         BgTask.child(child_body(key, from, to)),
-        function(data) Downloader.batch_done(key, data) end)
+        function(data) Downloader.batch_done(key, data, from) end)
     if not _task then
         Downloader.enqueue(key)
         schedule(Downloader.RETRY_DELAY, Downloader.tick)
@@ -322,10 +352,19 @@ function Downloader.apply_result(state, data)
     return false
 end
 
-function Downloader.batch_done(key, data)
+-- Apply a finished batch. `from` is the first chapter the batch downloaded:
+-- the result is dropped when the state no longer matches it (the novel was
+-- removed, or switched back to window mode and rebuilt while the batch ran —
+-- its chapter store is gone, and a window state has no volume_size to rebuild
+-- volumes with). The queue keeps being drained in that case.
+function Downloader.batch_done(key, data, from)
     _task = nil
     local state = LiveBook.load_state(key)
-    if not state then return end
+    if not state or state.mode ~= "full"
+       or (from and from ~= (state.downloaded or 0) + 1) then
+        schedule(Downloader.TICK_DELAY, Downloader.tick)
+        return
+    end
     local before   = state.downloaded or 0
     local progress = Downloader.apply_result(state, data)
     if progress then
@@ -351,8 +390,10 @@ function Downloader.batch_done(key, data)
         Downloader.enqueue(state.key)
     end
     -- Offline: stop the chain (leave the queue intact) instead of polling;
-    -- Inkstream:onNetworkConnected resumes it. Retries after a failed batch
-    -- are bounded by the FAIL_LIMIT skip above and only run while online.
+    -- Inkstream:onNetworkConnected resumes it. A batch that fails without
+    -- progress is retried after RETRY_DELAY while the device reports a
+    -- connection; a failing chapter is only skipped (FAIL_LIMIT) once the
+    -- source answers again for a neighbouring chapter.
     if not online() then return end
     schedule(progress and Downloader.TICK_DELAY or Downloader.RETRY_DELAY,
         Downloader.tick)
@@ -391,10 +432,18 @@ function Downloader.resume()
            and (state.downloaded or 0) < (state.total or 0) then
             Downloader.enqueue(state.key)
         end
-        if state.mode == "full" and state.switch_pending == "full" then
-            Downloader.process_switch(state)
-        end
     end
+    -- Switches run one UI tick later: resume() also runs from the plugin's
+    -- init, inside ReaderUI:init before ReaderUI.instance is set, where
+    -- process_switch's open-document guard cannot see the document being
+    -- opened and would delete it.
+    schedule(0, function()
+        for _, state in ipairs(LiveBook.all_states()) do
+            if state.mode == "full" and state.switch_pending == "full" then
+                Downloader.process_switch(state)
+            end
+        end
+    end)
     Downloader.tick()
 end
 

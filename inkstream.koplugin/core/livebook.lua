@@ -68,17 +68,39 @@ function LiveBook.load_state(key)
     end
     -- States created before full mode existed are window books.
     state.mode = state.mode or "window"
+    -- A volumes map with a gap (one volume failed to build) round-trips
+    -- through JSON as an object with string keys; restore numeric keys so
+    -- state.volumes[v] keeps working.
+    if type(state.volumes) == "table" then
+        local vols = {}
+        for k, v in pairs(state.volumes) do vols[tonumber(k) or k] = v end
+        state.volumes = vols
+    end
     _states[key] = state
     return state
 end
 
+-- Write a file via a temp file and rename, so a write cut off by power loss
+-- (state is saved on every chapter change) never leaves truncated JSON.
+local function write_atomic(path, content)
+    if type(content) ~= "string" then return false end
+    local tmp = path .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then return false end
+    local ok = f:write(content)
+    ok = f:close() and ok
+    if not ok or not os.rename(tmp, path) then
+        os.remove(tmp)
+        return false
+    end
+    return true
+end
+
 function LiveBook.save_state(state)
     ensure_dir()
-    local f = io.open(live_dir .. "/" .. state.key .. ".json", "w")
-    if not f then return false end
-    f:write(JSON.encode(state)); f:close()
     _states[state.key] = state
-    return true
+    return write_atomic(live_dir .. "/" .. state.key .. ".json",
+        JSON.encode(state))
 end
 
 function LiveBook.state_for(source_id, novel_path)
@@ -100,9 +122,7 @@ end
 
 local function index_save()
     ensure_dir()
-    local f = io.open(index_path, "w")
-    if not f then return end
-    f:write(JSON.encode(_index or {})); f:close()
+    write_atomic(index_path, JSON.encode(_index or {}))
 end
 
 -- Key for an entry of either format (string or {key, vol}).
@@ -305,13 +325,23 @@ end
 -- ── Chapter list ──────────────────────────────────────────────────────────────
 
 -- Full chapter list from the existing chapter cache (same keys as ui/detail).
+-- An empty cached list is not a usable chapter list (see
+-- refresh_chapter_list): report it as missing so callers reload instead of
+-- showing "no chapters" or building an empty book.
 function LiveBook.chapter_list(source_id, novel_path)
     local cache = DB.loadChapterCache(source_id, novel_path)
-    return cache and cache.chapters or nil
+    local chapters = cache and cache.chapters or nil
+    if not chapters or #chapters == 0 then return nil end
+    return chapters
 end
 
 -- Refresh the full chapter list via the extension and save the cache.
 -- Mirrors ui/detail.lua: parseNovelMeta total check first, then parseNovel.
+-- Returns nil (leaving the cache untouched) when the refresh produced no
+-- chapters: an extension can return a novel table with an empty chapter list
+-- when only the chapter-list request failed (e.g. novelfull's
+-- ajax-chapter-option call), and saving that would erase the cached list for
+-- every caller until a manual refresh.
 function LiveBook.refresh_chapter_list(ext, source_id, novel_path)
     local chapters
     if ext and type(ext.parseNovelMeta) == "function" then
@@ -330,6 +360,7 @@ function LiveBook.refresh_chapter_list(ext, source_id, novel_path)
         if not ok or not full then return nil end
         chapters = full.chapters or {}
     end
+    if #chapters == 0 then return nil end
     DB.saveChapterCache(source_id, novel_path, chapters, #chapters)
     return chapters
 end
@@ -602,7 +633,11 @@ function LiveBook.move_live_books(new_dir, open_file)
                     pcall(ReadCollection.updateItem, ReadCollection,
                         e.epub_path, new_path)
                 end
-                state.epub_path = new_path
+                -- A window book's EPUB is the live file; a volume's is not
+                -- (state.epub_path stays the nominal volume-1 path, set below).
+                if type(e.entry) ~= "table" then
+                    state.epub_path = new_path
+                end
                 LiveBook.save_state(state)
                 LiveBook.index_remove(e.epub_path)
                 if type(e.entry) == "table" then
@@ -624,9 +659,13 @@ function LiveBook.move_live_books(new_dir, open_file)
     for key, base in pairs(folder_for) do
         local state = LiveBook.load_state(key)
         if state then
-            state.folder    = base
-            state.epub_path = base .. "/" .. Live.volume_file_name(
-                (state.title or "Novel"):gsub('[<>:"/\\|?*]', "_"), 1)
+            state.folder = base
+            -- A window book still switching to full keeps its own EPUB path:
+            -- Downloader.process_switch migrates and removes that file.
+            if not state.switch_pending then
+                state.epub_path = base .. "/" .. Live.volume_file_name(
+                    (state.title or "Novel"):gsub('[<>:"/\\|?*]', "_"), 1)
+            end
             LiveBook.save_state(state)
         end
     end
@@ -689,6 +728,15 @@ function LiveBook.new_start(ext, meta, source_id, novel_path, start_idx, chapter
         stash      = prev and prev.stash or nil,
         created_at = prev and prev.created_at or nil,
     }
+    -- A full-mode state being switched back to a window (Detail.switch_to_window
+    -- calls this, then migrate_volumes_to_window on the returned state): the
+    -- volume bookkeeping must survive the switch so the migration can find the
+    -- volume files and their sidecars.
+    if prev and prev.mode == "full" then
+        state.volume_size = prev.volume_size
+        state.volumes     = prev.volumes
+        state.folder      = prev.folder
+    end
 
     -- Cover: fetched once, cached next to the state file.
     local cover_data, cover_ext
@@ -921,8 +969,12 @@ function LiveBook.migrate_volumes_to_window(state)
                         if pos then
                             local idx = (v - 1) * V + pos
                             if idx >= state.win_first and idx <= state.win_last then
+                                -- old_first is the full-list index of the volume's
+                                -- first chapter: the volume's own xpointers are
+                                -- chapter-relative to it, not to chapter 1.
                                 table.insert(kept, Live.remap_annotation(item,
-                                    vol.front or 0, state.front or 0, 1,
+                                    vol.front or 0, state.front or 0,
+                                    (v - 1) * V + 1,
                                     state.win_first, state.win_last))
                             else
                                 local key = tostring(idx)

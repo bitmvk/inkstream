@@ -18,6 +18,34 @@ local function ensure_dir()
     require("core.epub").mkdirp(db_dir)
 end
 
+-- Write a file atomically (temp file + rename).  A crash or power loss while
+-- writing must not truncate the previous file: load() would silently replace
+-- a corrupt tracked.json with an empty list and the next save() would make
+-- that loss permanent.  A nil encode result (rapidjson returns nil, err on
+-- failure) is dropped instead of reaching f:write().
+local function write_atomic(path, content)
+    if type(content) ~= "string" then return false end
+    local tmp = path .. ".tmp"
+    local f = io.open(tmp, "wb")
+    if not f then return false end
+    local ok = f:write(content)
+    f:flush()
+    f:close()
+    if not ok then
+        os.remove(tmp)
+        return false
+    end
+    if not os.rename(tmp, path) then
+        -- Filesystems that cannot replace an existing file with rename.
+        os.remove(path)
+        if not os.rename(tmp, path) then
+            os.remove(tmp)
+            return false
+        end
+    end
+    return true
+end
+
 local function load()
     if _data then return _data end
     ensure_dir()
@@ -35,11 +63,7 @@ end
 
 local function save()
     ensure_dir()
-    local f = io.open(db_path, "w")
-    if not f then return false end
-    f:write(JSON.encode(_data))
-    f:close()
-    return true
+    return write_atomic(db_path, JSON.encode(_data))
 end
 
 function DB.getAll()
@@ -135,10 +159,11 @@ function DB.markSeenUpTo(source_id, path, n)
         if nn.source_id == source_id and nn.path == path then
             local old_seen = nn.last_seen_count
             local old_new  = nn.new_chapters
+            -- Record the chapter actually reached, even when it is beyond the
+            -- stored total_chapters: the list in the cache is often newer than
+            -- the total in the DB, and clamping here would leave chapters the
+            -- reader has already read counted as new once the total catches up.
             local seen = math.max(nn.last_seen_count or 0, n or 0)
-            if nn.total_chapters and seen > nn.total_chapters then
-                seen = nn.total_chapters
-            end
             nn.last_seen_count = seen
             nn.new_chapters    = math.max(0, (nn.total_chapters or 0) - seen)
             if nn.last_seen_count ~= old_seen or nn.new_chapters ~= old_new then
@@ -165,11 +190,7 @@ end
 
 local function save_exports()
     ensure_dir()
-    local f = io.open(exports_path, "w")
-    if not f then return false end
-    f:write(JSON.encode(_exports))
-    f:close()
-    return true
+    return write_atomic(exports_path, JSON.encode(_exports))
 end
 
 -- Record which chapter paths were exported to which epub file.
@@ -240,10 +261,7 @@ function DB.saveChapterCache(source_id, novel_path, chapters, total)
     ensure_chapter_cache_dir()
     local key  = cache_key(source_id, novel_path)
     local path = chapter_cache_dir .. "/" .. key .. ".json"
-    local f = io.open(path, "w")
-    if not f then return end
-    f:write(JSON.encode({ chapters = chapters, total = total, saved_at = os.time() }))
-    f:close()
+    write_atomic(path, JSON.encode({ chapters = chapters, total = total, saved_at = os.time() }))
 end
 
 function DB.clearChapterCache(source_id, novel_path)
@@ -268,9 +286,10 @@ function DB.saveCoverCache(source_id, novel_path, data)
     ensure_cover_cache_dir()
     local key  = cache_key(source_id, novel_path)
     local path = cover_cache_dir .. "/" .. key .. ".img"
-    local f = io.open(path, "wb")
-    if not f then return end
-    f:write(data); f:close()
+    -- Atomic: a truncated cache file would be read as the cover forever
+    -- (loadCoverCache only checks that the file exists), so it is never
+    -- re-fetched.
+    write_atomic(path, data)
 end
 
 return DB

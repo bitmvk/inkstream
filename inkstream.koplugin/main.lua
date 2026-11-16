@@ -1,5 +1,5 @@
 -- Inkstream — main plugin entry point.
-_G.INKSTREAM_VERSION = "1.2.3"
+_G.INKSTREAM_VERSION = "1.2.21"
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager       = require("ui/uimanager")
@@ -27,14 +27,19 @@ _G.inkstream_close_all = close_all
 local _ready = false
 
 -- Turn Wi-Fi on (no prompt, whatever KOReader's Wi-Fi setting says) and run
--- callback once connected. If Wi-Fi cannot be turned on, nothing happens and
--- Inkstream stays open for offline use. Devices that manage Wi-Fi themselves
--- (Android, desktop) are left alone.
+-- callback once connected. Devices that manage Wi-Fi themselves (Android,
+-- desktop) are left alone. KOReader drops the callback for good when the
+-- connection attempt fails outright, so run it anyway: the fetch then fails
+-- fast and says so, instead of the check silently never happening.
 local function go_online(callback)
     local NetworkMgr = require("ui/network/manager")
     if NetworkMgr:isConnected() then return callback() end
-    if not require("device"):hasWifiToggle() then return end
-    NetworkMgr:turnOnWifiAndWaitForConnection(callback)
+    if not require("device"):hasWifiToggle() then return callback() end
+    -- Returns a widget while it connects, nil when it already ran the callback
+    -- (or another attempt is in flight), and false when the attempt failed.
+    if NetworkMgr:turnOnWifiAndWaitForConnection(callback) == false then
+        callback()
+    end
 end
 
 local function open_inkstream()
@@ -92,7 +97,8 @@ end
 
 -- Run a background subprocess task tied to the open live document (see
 -- core/bgtask.lua): the task is aborted when the document closes or another
--- file is opened meanwhile.
+-- file is opened meanwhile. Returns the task, or nil when one is already
+-- running or the subprocess could not be started.
 local function start_bg_task(self, kind, child_fn, done_cb)
     if not _live or _live.task then return end  -- never two tasks at once
     local state = _live.state
@@ -106,6 +112,7 @@ local function start_bg_task(self, kind, child_fn, done_cb)
         return file ~= nil and LiveBook.index_lookup(file) == state.key
     end)
     _live.task = task
+    return task
 end
 
 -- Load installed extensions (idempotent) in the parent process before forking
@@ -225,7 +232,7 @@ local function start_refresh_list(self)
 
         ensure_extensions()  -- parent loads extensions before the fork below
 
-        start_bg_task(self, "refresh_list", BgTask.child(function()
+        local task = start_bg_task(self, "refresh_list", BgTask.child(function()
             local ExtMgr    = require("core.extmgr")
             local LiveBookC = require("core.livebook")
             local ext = ExtMgr.get(source_id)
@@ -262,6 +269,12 @@ local function start_refresh_list(self)
                 start_refill(self, _live.cur)
             end
         end)
+        if not task then
+            -- The subprocess could not be started: say so and allow a retry.
+            _live.refreshed_end = false
+            UIManager:show(InfoMessage:new{
+                text = "Inkstream: could not refresh chapter list.", timeout = 3 })
+        end
     end)
 end
 
@@ -304,6 +317,17 @@ local function goto_chapter_full(self, state, idx)
         return
     end
     local path = LiveBook.volume_path_for(state, v)
+    local f = io.open(path, "r")
+    if not f then
+        -- The volume file is gone (deleted by hand, or KOReader was killed
+        -- after `downloaded` was saved but before the volume was built).
+        -- switchDocument would close the reader with no file to reopen it.
+        UIManager:show(InfoMessage:new{
+            text = "Volume " .. v .. " is not on disk. Reopen the novel from"
+                .. " the Library to rebuild it.", timeout = 4 })
+        return
+    end
+    f:close()
     local ok_ds, DocSettings = pcall(require, "docsettings")
     if ok_ds then
         local front = (state.volumes and state.volumes[v]
@@ -653,6 +677,13 @@ function Inkstream:onEndOfBook()
     local v     = _live.vol
     local d     = state.downloaded or 0
     if v * state.volume_size >= d then return end  -- no next volume yet
+    -- Don't close KOReader's dialog (or offer the jump) when the next volume
+    -- is not on disk: switchDocument would close the reader with no file to
+    -- reopen, leaving the device with no UI at all.
+    local next_path  = LiveBook.volume_path_for(state, v + 1)
+    local next_file  = io.open(next_path, "r")
+    if not next_file then return end
+    next_file:close()
 
     local top = UIManager:getTopmostVisibleWidget()
     if top and top.name == "end_document" then
@@ -660,7 +691,6 @@ function Inkstream:onEndOfBook()
     end
 
     local ConfirmBox = require("ui/widget/confirmbox")
-    local next_path  = LiveBook.volume_path_for(state, v + 1)
     UIManager:show(ConfirmBox:new{
         text        = "Continue to Vol. " .. (v + 1) .. "?",
         ok_text     = "Continue",

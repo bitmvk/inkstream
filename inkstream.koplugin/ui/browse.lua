@@ -196,10 +196,18 @@ function Browse.fetch_list(ctx, page, search_term)
             local novels, err
             if search_term and search_term ~= "" then
                 local ok, res = pcall(ext.searchNovels, ext, search_term, page)
-                if ok and res then novels = res.novels or res else err = tostring(res) end
+                if ok and res then
+                    novels = res.novels or res
+                else
+                    err = ok and "no data returned" or tostring(res)
+                end
             else
                 local ok, res = pcall(ext.popularNovels, ext, page, {})
-                if ok and res then novels = res.novels or res else err = tostring(res) end
+                if ok and res then
+                    novels = res.novels or res
+                else
+                    err = ok and "no data returned" or tostring(res)
+                end
             end
 
             UIManager:close(loading)

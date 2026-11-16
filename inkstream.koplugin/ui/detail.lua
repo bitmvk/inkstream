@@ -396,6 +396,11 @@ end
 function Detail.start_full_reading(info, start_idx)
     local source_id  = _source_id
     local novel_path = info.path or ""
+    -- Read the chapter list before waiting for Wi-Fi (which can take seconds):
+    -- _all_chapters and _source_id are module state, and by the time the
+    -- callback runs they can belong to a novel opened in the meantime.
+    local chapters   = #_all_chapters > 0 and _all_chapters
+        or LiveBook.chapter_list(source_id, novel_path)
     local meta = {
         title     = info.name or info.title or "Novel",
         author    = info.author,
@@ -406,10 +411,8 @@ function Detail.start_full_reading(info, start_idx)
         local msg = InfoMessage:new{ text = "Preparing novel…" }
         UIManager:show(msg)
         UIManager:scheduleIn(0.1, function()
-            local chapters = #_all_chapters > 0 and _all_chapters
-                or LiveBook.chapter_list(source_id, novel_path)
             local ok_state, err = LiveBook.new_start_full(
-                ExtMgr.get(_source_id), meta, source_id, novel_path, chapters)
+                ExtMgr.get(source_id), meta, source_id, novel_path, chapters)
             UIManager:close(msg)
             if not ok_state then
                 UIManager:show(InfoMessage:new{
@@ -449,6 +452,8 @@ end
 function Detail.start_window_reading(info, start_idx, open)
     local source_id  = _source_id
     local novel_path = info.path or ""
+    -- As in start_full_reading: capture the module state before the async wait.
+    local chapters   = _all_chapters
     local meta = {
         title     = info.name or info.title or "Novel",
         author    = info.author,
@@ -461,8 +466,8 @@ function Detail.start_window_reading(info, start_idx, open)
         UIManager:scheduleIn(0.1, function()
             -- First fetch may block the UI; that is acceptable here.
             local center = start_idx or 1
-            local ok_state, err = LiveBook.new_start(ExtMgr.get(_source_id),
-                meta, source_id, novel_path, center, _all_chapters)
+            local ok_state, err = LiveBook.new_start(ExtMgr.get(source_id),
+                meta, source_id, novel_path, center, chapters)
             UIManager:close(msg)
             if not ok_state then
                 UIManager:show(InfoMessage:new{
@@ -509,27 +514,34 @@ function Detail.ask_for_mode(info, start_idx, open)
     local V     = Settings:get("volume_size") or 200
     local title = info.name or info.title or "Novel"
     local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    UIManager:show(ButtonDialogTitle:new{
+    -- Declared first so the button callbacks can close it: a ButtonDialog does
+    -- not close itself, and a leftover one would sit over the reader (or the
+    -- novel screen) after the choice.
+    local dlg
+    dlg = ButtonDialogTitle:new{
         title   = "How should " .. title .. " be downloaded?",
         buttons = {
             {{
                 text     = "Window (stream as you read)",
                 callback = function()
+                    UIManager:close(dlg)
                     Detail.begin_live_reading(info, start_idx, open, "window")
                 end,
             }},
             {{
                 text     = "Download all (volumes of " .. V .. " chapters)",
                 callback = function()
+                    UIManager:close(dlg)
                     Detail.begin_live_reading(info, start_idx, open, "full")
                 end,
             }},
             {{
                 text     = "Cancel",
-                callback = function() end,
+                callback = function() UIManager:close(dlg) end,
             }},
         },
-    })
+    }
+    UIManager:show(dlg)
 end
 
 -- Resolve the mode for a novel with no live state (book_mode setting, or
@@ -581,6 +593,20 @@ function Detail.start_live_reading(info, start_idx, open, forced_mode)
 
     -- Existing state without an explicit mode choice: continue / jump.
     if state and not forced_mode then
+        -- A window→full switch is still pending: the window EPUB is removed
+        -- only once the volume holding the reading position is built, so it
+        -- is still the book to continue reading until then.
+        if not start_idx and state.switch_pending == "full" then
+            local f = io.open(state.epub_path, "r")
+            local exists = f ~= nil
+            if f then f:close() end
+            if exists then
+                close_all()
+                require("apps/reader/readerui"):showReader(state.epub_path)
+                return
+            end
+        end
+
         if state.mode == "full" then
             Detail.open_full_at(state, start_idx)
             return
@@ -827,7 +853,11 @@ function Detail.fetch(source_id, path)
         UIManager:show(loading)
 
         UIManager:scheduleIn(0.1, function()
-            if my_id ~= _fetch_id then return end
+            if my_id ~= _fetch_id then
+                -- Superseded by a newer fetch: drop this one's message.
+                UIManager:close(loading)
+                return
+            end
 
             local info
 
@@ -887,6 +917,21 @@ function Detail.fetch(source_id, path)
                             if info[k] == nil then info[k] = v end
                         end
                     end
+                    -- A failed fetch (or one that returned no chapters) must
+                    -- not erase a known list: fall back to the cache, and
+                    -- never save an empty list over it.
+                    if #_all_chapters == 0 and cache and cache.chapters then
+                        _all_chapters = cache.chapters
+                    end
+                    if #_all_chapters == 0 then
+                        UIManager:close(loading)
+                        UIManager:show(InfoMessage:new{
+                            text    = "Failed to load novel: "
+                                .. (ok_n and "no chapters" or tostring(full)),
+                            timeout = 4,
+                        })
+                        return
+                    end
                     DB.saveChapterCache(source_id, path, _all_chapters, #_all_chapters)
                 end
                 info.total_chapters = #_all_chapters
@@ -904,7 +949,18 @@ function Detail.fetch(source_id, path)
                 end
                 info          = full
                 _all_chapters = full.chapters or {}
-                DB.saveChapterCache(source_id, path, _all_chapters, #_all_chapters)
+                if #_all_chapters == 0 then
+                    -- The page loaded but yielded no chapters (the source's
+                    -- chapter-list request failed): keep the cached list
+                    -- instead of replacing it with an empty one.
+                    local cached = DB.loadChapterCache(source_id, path)
+                    if cached and cached.chapters and #cached.chapters > 0 then
+                        _all_chapters = cached.chapters
+                    end
+                end
+                if #_all_chapters > 0 then
+                    DB.saveChapterCache(source_id, path, _all_chapters, #_all_chapters)
+                end
             end
 
             UIManager:close(loading)

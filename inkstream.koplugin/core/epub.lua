@@ -26,6 +26,20 @@ end
 
 -- ── Cover image fetch ─────────────────────────────────────────────────────────
 
+-- Image type from the bytes themselves: URL extensions lie and servers answer
+-- errors or interstitials with status 200. Only the formats the EPUB carries
+-- are accepted; anything else means "no cover" rather than a bogus image
+-- entry the reader fails to decode. Returns nil for unknown data.
+local function image_ext(data)
+    local b1, b2, b3, b4 = data:byte(1, 4)
+    if b1 == 0x89 and b2 == 0x50 and b3 == 0x4E and b4 == 0x47 then return "png" end
+    if b1 == 0xFF and b2 == 0xD8 then return "jpg" end
+    if b1 == 0x47 and b2 == 0x49 and b3 == 0x46 then return "gif" end
+    if b1 == 0x52 and b2 == 0x49 and b3 == 0x46 and b4 == 0x46
+       and data:sub(9, 12) == "WEBP" then return "webp" end
+    return nil
+end
+
 local function fetch_cover(url)
     if not url or url == "" then return nil end
     local ok_h, https = pcall(require, "ssl.https")
@@ -46,8 +60,11 @@ local function fetch_cover(url)
         return nil
     end
     local data = table.concat(sink)
-    local ext  = (url:match("%.(%w+)%??[^%.]*$") or "jpg"):lower()
-    if ext ~= "png" and ext ~= "webp" then ext = "jpg" end
+    local ext  = image_ext(data)
+    if not ext then
+        logger.warn("Inkstream/Epub: cover is not a supported image url=", url)
+        return nil
+    end
     logger.dbg("Inkstream/Epub: cover fetched bytes=", #data, "ext=", ext)
     return data, ext
 end
@@ -97,7 +114,7 @@ local function write_zip(f, entries)
             "\x50\x4B\x03\x04", le2(20), le2(0), le2(0),
             MOD, le4(crc), le4(size), le4(size), nlen, le2(0), nm,
         })
-        f:write(lfh); f:write(e.data)
+        if not (f:write(lfh) and f:write(e.data)) then return false end
         table.insert(cd, table.concat({
             "\x50\x4B\x01\x02", le2(20), le2(20), le2(0), le2(0),
             MOD, le4(crc), le4(size), le4(size),
@@ -106,17 +123,23 @@ local function write_zip(f, entries)
         offset = offset + #lfh + size
     end
     local cd_start, cd_size = offset, 0
-    for _, r in ipairs(cd) do f:write(r); cd_size = cd_size + #r end
-    f:write(table.concat({
+    for _, r in ipairs(cd) do
+        if not f:write(r) then return false end
+        cd_size = cd_size + #r
+    end
+    return f:write(table.concat({
         "\x50\x4B\x05\x06", le2(0), le2(0),
         le2(#entries), le2(#entries), le4(cd_size), le4(cd_start), le2(0),
-    }))
+    })) ~= nil
 end
 
 -- ── XML / HTML helpers ────────────────────────────────────────────────────────
 
 local function xml_esc(s)
-    return (s or ""):gsub("&","&amp;"):gsub("<","&lt;"):gsub(">","&gt;"):gsub('"',"&quot;")
+    -- Drop C0 control characters XML 1.0 forbids before escaping; a scraped
+    -- title can carry them and they make the whole document unparseable.
+    return (s or ""):gsub("[%z\1-\8\11\12\14-\31]", "")
+        :gsub("&","&amp;"):gsub("<","&lt;"):gsub(">","&gt;"):gsub('"',"&quot;")
 end
 
 local function chapter_id(i) return string.format("ch%04d", i) end
@@ -152,7 +175,10 @@ local function make_opf(meta, chapters, cover_ext, live)
     local man, spine = {}, {}
 
     if cover_ext then
-        local mime = cover_ext == "png" and "image/png" or "image/jpeg"
+        local mime = cover_ext == "png" and "image/png"
+                  or cover_ext == "webp" and "image/webp"
+                  or cover_ext == "gif" and "image/gif"
+                  or "image/jpeg"
         table.insert(man, ('    <item id="cover-img" href="Images/cover.%s" media-type="%s"/>'):format(cover_ext, mime))
         table.insert(man, '    <item id="cover-page" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>')
         table.insert(spine, '    <itemref idref="cover-page" linear="yes"/>')
@@ -317,7 +343,18 @@ local function clean_html(body)
     body = body:gsub("<hr>",  "<hr/>")
     body = body:gsub("<p>%s*</p>", "")
     body = body:gsub("<div>%s*</div>", "")
-    body = body:gsub("(\n%s*){3,}", "\n\n")
+    -- Collapse 3+ line breaks. A nested repetition like (\n%s*){3,} backtracks
+    -- quadratically on long whitespace runs, stalling the build on big pages.
+    body = body:gsub("\n[ \t\r]*\n[ \t\r]*\n[ \t\r\n]*", "\n\n")
+    -- Text between tags must be XML-safe: a bare '&' ("Tom & Jerry") or a '<'
+    -- that cannot start a tag ("x < 3") is invalid XML and can stop the reader
+    -- from loading the whole book. Existing entities are left intact, and XML
+    -- 1.0 forbids the C0 control characters removed here.
+    body = body:gsub("[%z\1-\8\11\12\14-\31]", "")
+    body = body:gsub("&(#?%w+;)", "\2%1")
+    body = body:gsub("&", "&amp;")
+    body = body:gsub("\2", "&")
+    body = body:gsub("<([^%a/!?])", "&lt;%1")
     return body
 end
 
@@ -345,19 +382,24 @@ end
 -- ── Public: build one EPUB ────────────────────────────────────────────────────
 -- meta: {title, author, language, series, series_index, cover_url, summary,
 --        cover_data, cover_ext}   (cover_data/cover_ext: pre-fetched bytes,
---        used instead of a new fetch when opts.live is set)
+--        used instead of a new fetch when present)
 -- chapters: [{title, content}]
 -- opts: { live = true } builds a live window: no synopsis page, no HTML ToC
--- page, pre-fetched cover used as-is. In live mode a second return value is
--- the number of front-matter spine items (1 with a cover page, else 0).
+-- page. In live mode a second return value is the number of front-matter spine
+-- items (1 with a cover page, else 0).
 
 local function build(meta, chapters, output_path, opts)
     local live = opts and opts.live
+    if not chapters or #chapters == 0 then
+        -- An EPUB spine needs at least one itemref; nothing to write.
+        if live then return false, nil end
+        return false, "no_chapters"
+    end
     mkdirp(output_path:match("^(.*)[/\\][^/\\]+$") or ".")
 
-    -- Cover: pre-fetched bytes in live mode, otherwise fetch the URL.
+    -- Cover: pre-fetched bytes when the caller has them, otherwise fetch the URL.
     local cover_data, cover_ext
-    if live and meta.cover_data and meta.cover_ext then
+    if meta.cover_data and meta.cover_data ~= "" and meta.cover_ext then
         cover_data, cover_ext = meta.cover_data, meta.cover_ext
     elseif meta.cover_url and meta.cover_url ~= "" then
         cover_data, cover_ext = fetch_cover(meta.cover_url)
@@ -395,8 +437,15 @@ local function build(meta, chapters, output_path, opts)
         if live then return false, nil end
         return false, "cannot_write: " .. output_path
     end
-    write_zip(f, entries)
-    f:close()
+    local wrote = write_zip(f, entries)
+    local closed = f:close()
+    if not wrote or not closed then
+        -- A short write (e.g. full disk) must not leave a truncated EPUB that
+        -- the reader would then fail to open.
+        os.remove(output_path)
+        if live then return false, nil end
+        return false, "cannot_write: " .. output_path
+    end
     logger.dbg("Inkstream/Epub: wrote", output_path)
     if live then
         return true, cover_data and 1 or 0
@@ -418,13 +467,22 @@ local function export(mode, options, chapters, fetch_fn, progress)
     logger.dbg("Inkstream/Epub: export mode=", mode, "out_dir=", out_dir, "chapters=", #chapters)
     mkdirp(out_dir)
 
+    -- Fetch the cover once per export: every volume of a per_chapter/every_n
+    -- export would otherwise re-download the same image.
+    local cover_data, cover_ext
+    if options.cover_url and options.cover_url ~= "" then
+        cover_data, cover_ext = fetch_cover(options.cover_url)
+    end
+
     local base_meta = {
-        title     = title,
-        author    = options.author,
-        language  = options.language or "en",
-        series    = options.series or title,
-        cover_url = options.cover_url,
-        summary   = options.summary,
+        title      = title,
+        author     = options.author,
+        language   = options.language or "en",
+        series     = options.series or title,
+        cover_url  = options.cover_url,
+        cover_data = cover_data,
+        cover_ext  = cover_ext,
+        summary    = options.summary,
     }
 
     local exported, errors = {}, {}
@@ -469,6 +527,8 @@ local function export(mode, options, chapters, fetch_fn, progress)
                     series       = base_meta.series,
                     series_index = cnum,
                     cover_url    = options.cover_url,
+                    cover_data   = cover_data,
+                    cover_ext    = cover_ext,
                     summary      = options.summary,
                 }, {{title=ch.name, content=html}})
             else
@@ -493,6 +553,8 @@ local function export(mode, options, chapters, fetch_fn, progress)
                     series       = base_meta.series,
                     series_index = vol,
                     cover_url    = options.cover_url,
+                    cover_data   = cover_data,
+                    cover_ext    = cover_ext,
                     summary      = options.summary,
                 },
                 fetch_batch(batch))
