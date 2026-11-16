@@ -1,5 +1,5 @@
 -- Inkstream — main plugin entry point.
-_G.INKSTREAM_VERSION = "1.2.1"
+_G.INKSTREAM_VERSION = "1.2.2"
 
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager       = require("ui/uimanager")
@@ -208,46 +208,72 @@ end
 local function start_refresh_list(self)
     local live = _live
     if not live or live.task then return end
-    live.refreshed_end = true
+    live.refreshed_end = true  -- stop page turns queueing a retry while connecting
     local state      = live.state
     local source_id  = state.source_id
     local novel_path = state.novel_path
     local old_total  = state.total or 0
+    local key        = state.key
 
-    ensure_extensions()  -- parent loads extensions before the fork below
+    -- Check the source online first: go_online turns Wi-Fi on without
+    -- prompting (or does nothing on devices that manage Wi-Fi themselves).
+    -- The check itself runs in the callback once connected.
+    go_online(function()
+        -- The book may have closed or changed while connecting.
+        if not _live or _live.state.key ~= key or _live.task then return end
 
-    start_bg_task(self, "refresh_list", BgTask.child(function()
-        local ExtMgr    = require("core.extmgr")
-        local LiveBookC = require("core.livebook")
-        local ext = ExtMgr.get(source_id)
-        local chapters = LiveBookC.refresh_chapter_list(ext, source_id, novel_path)
-        return { total = chapters and #chapters or nil }
-    end), function(data)
-        local total = data and data.total
-        if not total then
-            _live.refreshed_end = false  -- allow a retry on the next page turn
+        ensure_extensions()  -- parent loads extensions before the fork below
+
+        start_bg_task(self, "refresh_list", BgTask.child(function()
+            local ExtMgr    = require("core.extmgr")
+            local LiveBookC = require("core.livebook")
+            local ext = ExtMgr.get(source_id)
+            local chapters = LiveBookC.refresh_chapter_list(ext, source_id, novel_path)
+            return { total = chapters and #chapters or nil }
+        end), function(data)
+            local total = data and data.total
+            if not total then
+                _live.refreshed_end = false  -- allow a retry on the next page turn
+                UIManager:show(InfoMessage:new{
+                    text = "Inkstream: could not refresh chapter list.", timeout = 3 })
+                return
+            end
+            _live.chapters = LiveBook.chapter_list(source_id, novel_path)
+            if total <= old_total then
+                UIManager:show(InfoMessage:new{ text = "No new chapters yet", timeout = 3 })
+                return
+            end
+            _live.refreshed_end = false  -- allow another check at the new end
+            state.total = total
+            LiveBook.save_state(state)
             UIManager:show(InfoMessage:new{
-                text = "Inkstream: could not refresh chapter list.", timeout = 3 })
-            return
-        end
-        _live.chapters = LiveBook.chapter_list(source_id, novel_path)
-        if total <= old_total then
-            UIManager:show(InfoMessage:new{ text = "No new chapters yet", timeout = 3 })
-            return
-        end
-        _live.refreshed_end = false  -- allow another check at the new end
-        state.total = total
-        LiveBook.save_state(state)
-        if state.mode == "full" then
-            -- New chapters: the downloader appends them to the last volume
-            -- (until it reaches volume_size, then a new volume starts).
-            local Downloader = require("core.downloader")
-            Downloader.enqueue(state.key)
-            Downloader.tick()
-        elseif Live.needs_refill(_live.cur, state.win_last, total) then
-            start_refill(self, _live.cur)
-        end
+                text = (total - old_total) .. " new chapter(s) found", timeout = 3 })
+            if state.mode == "full" then
+                -- New chapters: the downloader appends them to the last volume
+                -- (until it reaches volume_size, then a new volume starts).
+                local Downloader = require("core.downloader")
+                Downloader.enqueue(state.key)
+                Downloader.tick()
+            elseif Live.needs_refill(_live.cur, state.win_last, total) then
+                start_refill(self, _live.cur)
+            end
+        end)
     end)
+end
+
+-- Manual "Check for new chapters" (reader menu): runs the same refresh as the
+-- automatic end-of-book check, but on demand and regardless of refreshed_end,
+-- so it works mid-book and in both window and full modes.
+local function check_new_chapters(self, state)
+    if not _live or _live.state.key ~= state.key then return end
+    if _live.task then
+        UIManager:show(InfoMessage:new{
+            text = "Inkstream is busy, try again in a moment.", timeout = 3 })
+        return
+    end
+    UIManager:show(InfoMessage:new{
+        text = "Checking for new chapters…", timeout = 2 })
+    start_refresh_list(self)
 end
 
 -- ── "Go to chapter…" menu ─────────────────────────────────────────────────────
@@ -437,6 +463,13 @@ function Inkstream:addToMainMenu(menu_items)
         sorting_hint = "navi",
         callback     = function()
             show_goto_chapter_menu(self, state)
+        end,
+    }
+    menu_items.inkstream_check_new_chapters = {
+        text         = "Check for new chapters",
+        sorting_hint = "navi",
+        callback     = function()
+            check_new_chapters(self, state)
         end,
     }
 end
